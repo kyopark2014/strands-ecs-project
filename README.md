@@ -4,8 +4,7 @@
 
 여기에서 사용하는 architecture는 아래와 같습니다. Agent의 기본동작 확인 및 구현을 위해 **ECS Fargate**에 Docker 컨테이너 형태로 탑재되어 ALB와 CloudFront를 이용해 사용자가 Streamlit으로 동작을 테스트할 수 있습니다. 컨테이너 이미지는 **ECR**에 저장되며, `installer.py`가 Dockerfile을 빌드하여 push합니다. Agent가 생성하는 그림이나 문서는 S3를 이용해 공유될 수 있으며, 컨테이너에 내장된 MCP server/client를 이용해 인터넷검색(Tavily), RAG(knowledge base), AWS tools(use-aws), AWS Document를 이용할 수 있습니다.
 
-
-<img width="1000" alt="image" src="https://github.com/user-attachments/assets/abd85f90-51b4-41d6-ae65-525fecb015ff" />
+<img width="1000" alt="image" src="https://github.com/user-attachments/assets/66ebfed9-6209-4bab-a33d-e91250eb68e7" />
 
 
 Strands agent는 아래와 같은 [Agent Loop](https://strandsagents.com/0.1.x/user-guide/concepts/agents/agent-loop/)을 가지고 있으므로, 적절한 tool을 선택하여 실행하고, reasoning을 통해 반복적으로 필요한 동작을 수행합니다. 
