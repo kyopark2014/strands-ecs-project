@@ -3258,6 +3258,73 @@ def build_app_environment(
     }
 
 
+def _application_config_path() -> str:
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(project_root, "application", "config.json")
+
+
+def write_application_config(config_data: Dict, *, merge_existing: bool = True) -> bool:
+    """Write application/config.json for local development and ECS runtime."""
+    config_path = _application_config_path()
+    data = dict(config_data)
+
+    if merge_existing:
+        try:
+            with open(config_path, "r") as f:
+                data = {**json.load(f), **data}
+        except FileNotFoundError:
+            logger.info(f"Creating new {config_path}")
+        except Exception as e:
+            logger.warning(f"Could not read existing {config_path}: {e}")
+
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        logger.warning(f"Could not write {config_path}: {e}")
+        return False
+
+
+def build_config_from_deployment_state(
+    knowledge_base_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
+    knowledge_base_role_arn: Optional[str] = None,
+    agentcore_memory_role_arn: Optional[str] = None,
+    s3_vectors_info: Optional[Dict[str, str]] = None,
+    s3_bucket_name: Optional[str] = None,
+    cloudfront_info: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Build config.json payload from whatever deployment resources are available."""
+    config_data: Dict[str, str] = {
+        "projectName": project_name,
+        "accountId": account_id,
+        "region": region,
+        "collectionArn": "",
+        "opensearch_url": "",
+    }
+    if knowledge_base_id:
+        config_data["knowledge_base_id"] = knowledge_base_id
+    if data_source_id:
+        config_data["data_source_id"] = data_source_id
+    if knowledge_base_role_arn:
+        config_data["knowledge_base_role"] = knowledge_base_role_arn
+    if s3_vectors_info:
+        config_data["vector_bucket_name"] = s3_vectors_info.get("vectorBucketName", "")
+        config_data["vector_bucket_arn"] = s3_vectors_info.get("vectorBucketArn", "")
+        config_data["vector_index_name"] = s3_vectors_info.get("indexName", "")
+        config_data["vector_index_arn"] = s3_vectors_info.get("indexArn", "")
+    if s3_bucket_name:
+        config_data["s3_bucket"] = s3_bucket_name
+        config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
+    if cloudfront_info:
+        config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
+    if agentcore_memory_role_arn:
+        config_data["agentcore_memory_role"] = agentcore_memory_role_arn
+    return config_data
+
+
 def create_ecr_repository() -> str:
     """Create ECR repository and return repository URI."""
     logger.info("[8/10] Creating ECR repository")
@@ -4434,6 +4501,7 @@ def main():
     cloudfront_info = None
     instance_id = None
     ecs_info = None
+    app_environment = None
     deployment_success = False
     
     try:
@@ -4484,12 +4552,17 @@ def main():
             knowledge_base_id,
             data_source_id,
         )
+        if write_application_config(app_environment):
+            logger.info("Local testing is available while deployment continues:")
+            logger.info("  streamlit run application/app.py")
         repository_uri = create_ecr_repository()
         if args.skip_docker_build:
             image_uri = f"{repository_uri}:latest"
             logger.warning(f"Skipping Docker build; using existing image: {image_uri}")
         else:
             image_uri = build_and_push_docker_image(repository_uri)
+            if write_application_config(app_environment):
+                logger.info(f"✓ Updated {_application_config_path()} after Docker build")
         log_group_name = create_ecs_log_group()
         ecs_info = deploy_ecs_service(
             vpc_info,
@@ -4560,59 +4633,29 @@ def main():
         raise
     finally:
         # Always generate application/config.json with whatever data is available
-        config_path = "application/config.json"
-        config_data = {}
-        
-        # Read existing config if it exists
-        try:
-            with open(config_path, 'r') as f:
-                config_data = json.load(f)
-        except FileNotFoundError:
-            logger.info(f"Creating new {config_path}")
-        except Exception as e:
-            logger.warning(f"Could not read existing {config_path}: {e}")
-        
-        # Update fields with available deployment results
-        config_data.update({
-            "projectName": project_name,
-            "accountId": account_id,
-            "region": region,
-        })
-        if knowledge_base_id:
-            config_data["knowledge_base_id"] = knowledge_base_id
-        if data_source_id:
-            config_data["data_source_id"] = data_source_id
-        if knowledge_base_role_arn:
-            config_data["knowledge_base_role"] = knowledge_base_role_arn
-        config_data["collectionArn"] = ""
-        config_data["opensearch_url"] = ""
-        if s3_vectors_info:
-            config_data["vector_bucket_name"] = s3_vectors_info.get("vectorBucketName", "")
-            config_data["vector_bucket_arn"] = s3_vectors_info.get("vectorBucketArn", "")
-            config_data["vector_index_name"] = s3_vectors_info.get("indexName", "")
-            config_data["vector_index_arn"] = s3_vectors_info.get("indexArn", "")
-        if s3_bucket_name:
-            config_data["s3_bucket"] = s3_bucket_name
-            config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
-        if cloudfront_info:
-            config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
-        if agentcore_memory_role_arn:
-            config_data["agentcore_memory_role"] = agentcore_memory_role_arn
-        
+        config_path = _application_config_path()
+        if app_environment is not None:
+            config_data = app_environment
+        else:
+            config_data = build_config_from_deployment_state(
+                knowledge_base_id=knowledge_base_id,
+                data_source_id=data_source_id,
+                knowledge_base_role_arn=knowledge_base_role_arn,
+                agentcore_memory_role_arn=agentcore_memory_role_arn,
+                s3_vectors_info=s3_vectors_info,
+                s3_bucket_name=s3_bucket_name,
+                cloudfront_info=cloudfront_info,
+            )
+
         if s3_vectors_info:
             logger.info(f"S3 Vector Bucket ARN: {s3_vectors_info.get('vectorBucketArn', 'N/A')}")
             logger.info(f"S3 Vector Index ARN: {s3_vectors_info.get('indexArn', 'N/A')}")
-        
-        try:
-            os.makedirs(os.path.dirname(config_path), exist_ok=True)
-            with open(config_path, 'w') as f:
-                json.dump(config_data, f, indent=2)
+
+        if write_application_config(config_data):
             if deployment_success:
                 logger.info(f"✓ Updated {config_path}")
             else:
                 logger.info(f"✓ Saved partial deployment info to {config_path}")
-        except Exception as e:
-            logger.warning(f"Could not update {config_path}: {e}")
 
 
 if __name__ == "__main__":
