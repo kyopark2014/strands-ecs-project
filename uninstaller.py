@@ -9,8 +9,8 @@ import time
 import logging
 from botocore.exceptions import ClientError
 
-# Configuration
-project_name = "sam" # at least 3 characters
+# Configuration (must match installer.py)
+project_name = "strands-ecs" # at least 3 characters
 region = "us-west-2"
 
 sts_client = boto3.client("sts", region_name=region)
@@ -25,6 +25,7 @@ ec2_client = boto3.client("ec2", region_name=region)
 elbv2_client = boto3.client("elbv2", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
+s3vectors_client = boto3.client("s3vectors", region_name=region)
 ecs_client = boto3.client("ecs", region_name=region)
 ecr_client = boto3.client("ecr", region_name=region)
 logs_client = boto3.client("logs", region_name=region)
@@ -34,6 +35,10 @@ if not account_id:
     account_id = sts_client.get_caller_identity()["Account"]
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
+vector_index_name = project_name
+vector_bucket_name = f"{project_name}-{account_id}"
+cloudfront_comment_marker = f"CloudFront-for-{project_name}"
+cloudfront_oai_comment_marker = f"OAI for {project_name} S3 bucket"
 
 # Configure logging
 def setup_logging():
@@ -46,69 +51,145 @@ def setup_logging():
 
 logger = setup_logging()
 
-def delete_cloudfront_distributions():
-    """Delete CloudFront distributions."""
-    logger.info("[1/9] Deleting CloudFront distributions")
-    
-    try:
-        distributions = cloudfront_client.list_distributions()
-        for dist in distributions.get("DistributionList", {}).get("Items", []):
-            if project_name in dist.get("Comment", ""):
-                dist_id = dist["Id"]
-                logger.info(f"  Disabling distribution: {dist_id}")
-                
-                # Get current config
-                config_response = cloudfront_client.get_distribution_config(Id=dist_id)
-                config = config_response["DistributionConfig"]
-                etag = config_response["ETag"]
-                
-                # Disable distribution
-                config["Enabled"] = False
-                cloudfront_client.update_distribution(
-                    Id=dist_id,
-                    DistributionConfig=config,
-                    IfMatch=etag
-                )
-                
-                logger.info(f"  Distribution {dist_id} disabled, will be deleted after deployment")
-        
-        logger.info("✓ CloudFront distributions processed")
-    except Exception as e:
-        logger.error(f"Error processing CloudFront distributions: {e}")
+def list_project_cloudfront_distributions():
+    """List CloudFront distributions created by installer.py."""
+    distributions = []
+    paginator = cloudfront_client.get_paginator("list_distributions")
+    for page in paginator.paginate():
+        for dist in page.get("DistributionList", {}).get("Items", []) or []:
+            if cloudfront_comment_marker in dist.get("Comment", ""):
+                distributions.append(dist)
+    return distributions
 
-def delete_disabled_cloudfront_distributions():
-    """Delete disabled CloudFront distributions."""
-    logger.info("Deleting disabled CloudFront distributions")
-    
+
+def get_cloudfront_distribution_state(dist_id):
+    """Return deployment status and enabled flag for a distribution."""
+    dist_response = cloudfront_client.get_distribution(Id=dist_id)
+    config_response = cloudfront_client.get_distribution_config(Id=dist_id)
+    return {
+        "status": dist_response["Distribution"]["Status"],
+        "enabled": config_response["DistributionConfig"]["Enabled"],
+        "etag": config_response["ETag"],
+    }
+
+
+def wait_for_cloudfront_distributions_disabled(dist_ids, timeout_seconds=1500, poll_interval=30):
+    """Wait until all distributions are disabled and fully deployed."""
+    if not dist_ids:
+        return True
+
+    logger.info(
+        f"  Waiting for CloudFront disable deployment (up to {timeout_seconds // 60} minutes)..."
+    )
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        pending = []
+        for dist_id in dist_ids:
+            try:
+                state = get_cloudfront_distribution_state(dist_id)
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "NoSuchDistribution":
+                    continue
+                raise
+
+            if state["enabled"] or state["status"] != "Deployed":
+                pending.append(f"{dist_id}({state['status']}, enabled={state['enabled']})")
+
+        if not pending:
+            logger.info("  ✓ All CloudFront distributions are disabled and deployed")
+            return True
+
+        logger.info(f"  Still waiting: {', '.join(pending)}")
+        time.sleep(poll_interval)
+
+    logger.error("  ✗ Timed out waiting for CloudFront distributions to finish disabling")
+    return False
+
+
+def delete_cloudfront_origin_access_identities():
+    """Delete Origin Access Identities created for the project S3 bucket."""
     try:
-        distributions = cloudfront_client.list_distributions()
-        for dist in distributions.get("DistributionList", {}).get("Items", []):
-            if project_name in dist.get("Comment", "") and not dist.get("Enabled", True):
-                dist_id = dist["Id"]
-                logger.info(f"  Deleting disabled distribution: {dist_id}")
-                
-                try:
-                    # Get current config and ETag
-                    config_response = cloudfront_client.get_distribution_config(Id=dist_id)
-                    etag = config_response["ETag"]
-                    
-                    # Delete distribution
-                    cloudfront_client.delete_distribution(
-                        Id=dist_id,
-                        IfMatch=etag
+        oai_list = cloudfront_client.list_cloud_front_origin_access_identities()
+        for oai in oai_list.get("CloudFrontOriginAccessIdentityList", {}).get("Items", []) or []:
+            if cloudfront_oai_comment_marker not in oai.get("Comment", ""):
+                continue
+
+            oai_id = oai["Id"]
+            try:
+                cloudfront_client.delete_cloud_front_origin_access_identity(Id=oai_id)
+                logger.info(f"  ✓ Deleted Origin Access Identity: {oai_id}")
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "CloudFrontOriginAccessIdentityInUse":
+                    logger.warning(
+                        f"  OAI {oai_id} is still in use by another distribution; delete manually if needed"
                     )
-                    logger.info(f"  ✓ Deleted distribution: {dist_id}")
-                except ClientError as e:
-                    if e.response["Error"]["Code"] == "DistributionNotDisabled":
-                        logger.info(f"  Distribution {dist_id} is not fully disabled yet, skipping")
-                    elif e.response["Error"]["Code"] == "NoSuchDistribution":
-                        logger.debug(f"  Distribution {dist_id} already deleted")
-                    else:
-                        logger.warning(f"  Could not delete distribution {dist_id}: {e}")
-        
-        logger.info("✓ Disabled CloudFront distributions processed")
+                elif e.response["Error"]["Code"] != "NoSuchCloudFrontOriginAccessIdentity":
+                    logger.warning(f"  Could not delete OAI {oai_id}: {e}")
     except Exception as e:
-        logger.error(f"Error deleting disabled CloudFront distributions: {e}")
+        logger.warning(f"  Could not delete Origin Access Identities: {e}")
+
+
+def delete_cloudfront_resources():
+    """Disable, wait for deployment, delete CloudFront distributions and related OAI."""
+    logger.info("[1/10] Deleting CloudFront resources")
+
+    try:
+        distributions = list_project_cloudfront_distributions()
+        if not distributions:
+            logger.info(f"  No CloudFront distributions found for comment: {cloudfront_comment_marker}")
+            delete_cloudfront_origin_access_identities()
+            logger.info("✓ CloudFront resources processed")
+            return True
+
+        dist_ids = [dist["Id"] for dist in distributions]
+        logger.info(f"  Found CloudFront distribution(s): {dist_ids}")
+
+        for dist in distributions:
+            dist_id = dist["Id"]
+            state = get_cloudfront_distribution_state(dist_id)
+            if not state["enabled"]:
+                logger.info(f"  Distribution {dist_id} is already disabled")
+                continue
+
+            config_response = cloudfront_client.get_distribution_config(Id=dist_id)
+            config = config_response["DistributionConfig"]
+            config["Enabled"] = False
+            cloudfront_client.update_distribution(
+                Id=dist_id,
+                DistributionConfig=config,
+                IfMatch=config_response["ETag"],
+            )
+            logger.info(f"  Disabled distribution: {dist_id}")
+
+        if not wait_for_cloudfront_distributions_disabled(dist_ids):
+            logger.error("  CloudFront distributions were not fully disabled; skipping deletion")
+            return False
+
+        remaining = []
+        for dist_id in dist_ids:
+            try:
+                state = get_cloudfront_distribution_state(dist_id)
+                cloudfront_client.delete_distribution(Id=dist_id, IfMatch=state["etag"])
+                logger.info(f"  ✓ Deleted distribution: {dist_id}")
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code == "NoSuchDistribution":
+                    logger.debug(f"  Distribution {dist_id} already deleted")
+                else:
+                    remaining.append(dist_id)
+                    logger.warning(f"  Could not delete distribution {dist_id}: {e}")
+
+        delete_cloudfront_origin_access_identities()
+
+        if remaining:
+            logger.error(f"  ✗ CloudFront distribution(s) still remain: {remaining}")
+            return False
+
+        logger.info("✓ CloudFront resources deleted")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting CloudFront resources: {e}")
+        return False
 
 def delete_alb_resources():
     """Delete ALB, target groups, and listeners."""
@@ -747,9 +828,41 @@ def delete_knowledge_bases():
     except Exception as e:
         logger.error(f"Error deleting Knowledge Bases: {e}")
 
+def delete_s3_vectors_store():
+    """Delete S3 Vectors index and vector bucket."""
+    logger.info("[6/10] Deleting S3 Vectors store")
+
+    try:
+        try:
+            s3vectors_client.delete_index(
+                vectorBucketName=vector_bucket_name,
+                indexName=vector_index_name,
+            )
+            logger.info(f"  ✓ Deleted vector index: {vector_index_name}")
+            time.sleep(5)
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "NotFoundException":
+                logger.warning(f"  Could not delete vector index {vector_index_name}: {e}")
+            else:
+                logger.info(f"  Vector index not found: {vector_index_name}")
+
+        try:
+            s3vectors_client.delete_vector_bucket(vectorBucketName=vector_bucket_name)
+            logger.info(f"  ✓ Deleted vector bucket: {vector_bucket_name}")
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "NotFoundException":
+                logger.warning(f"  Could not delete vector bucket {vector_bucket_name}: {e}")
+            else:
+                logger.info(f"  Vector bucket not found: {vector_bucket_name}")
+
+        logger.info("✓ S3 Vectors store deleted")
+    except Exception as e:
+        logger.error(f"Error deleting S3 Vectors store: {e}")
+
+
 def delete_secrets():
     """Delete Secrets Manager secrets."""
-    logger.info("[6/9] Deleting secrets")
+    logger.info("[7/10] Deleting secrets")
     
     secret_names = [
         f"openweathermap-{project_name}",
@@ -777,7 +890,7 @@ def delete_secrets():
 
 def delete_iam_roles():
     """Delete IAM roles and policies."""
-    logger.info("[7/9] Deleting IAM roles")
+    logger.info("[8/10] Deleting IAM roles")
     
     role_names = [
         f"role-knowledge-base-for-{project_name}-{region}",
@@ -837,7 +950,7 @@ def delete_iam_roles():
 
 def delete_s3_buckets():
     """Delete S3 buckets and all objects."""
-    logger.info("[8/9] Deleting S3 buckets")
+    logger.info("[9/10] Deleting S3 buckets")
     
     # List of possible bucket names
     bucket_names = [
@@ -906,24 +1019,31 @@ def main():
     logger.info("="*60)
     
     start_time = time.time()
+    cleanup_errors = []
     
     try:
-        delete_cloudfront_distributions()
+        if not delete_cloudfront_resources():
+            cleanup_errors.append("CloudFront")
         delete_ecs_resources()
         delete_alb_resources()
         delete_ec2_instances()
         delete_vpc_resources()
         delete_opensearch_collection()
         delete_knowledge_bases()
+        delete_s3_vectors_store()
         delete_secrets()
         delete_iam_roles()
         delete_s3_buckets()
-        delete_disabled_cloudfront_distributions()
         
         elapsed_time = time.time() - start_time
         logger.info("")
         logger.info("="*60)
-        logger.info("Infrastructure Cleanup Completed Successfully!")
+        if cleanup_errors:
+            logger.warning("Infrastructure Cleanup Completed With Warnings")
+            logger.warning(f"Resources that may still remain: {', '.join(cleanup_errors)}")
+            logger.warning("Re-run uninstaller.py after a few minutes if CloudFront is still deploying.")
+        else:
+            logger.info("Infrastructure Cleanup Completed Successfully!")
         logger.info("="*60)
         logger.info(f"Total cleanup time: {elapsed_time/60:.2f} minutes")
         logger.info("="*60)
