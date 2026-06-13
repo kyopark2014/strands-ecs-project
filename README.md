@@ -477,24 +477,6 @@ aws ecs update-service \
 
 > 이전 EC2 배포 방식의 `update.sh` / Session Manager 접속은 ECS 배포에서는 사용하지 않습니다.
 
-### 실행 로그 확인
-
-ECS Fargate 태스크 로그는 **CloudWatch Logs**에 저장됩니다. 로그 그룹 이름: `/ecs/app-for-{project_name}`
-
-AWS CLI로 실시간 로그를 확인합니다.
-
-```text
-aws logs tail /ecs/app-for-dwfb --follow --region us-west-2
-```
-
-또는 [CloudWatch Logs Console](https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#logsV2:log-groups)에서 `/ecs/app-for-{project_name}` 로그 그룹을 선택합니다.
-
-ECS 서비스/태스크 상태는 [ECS Console](https://us-west-2.console.aws.amazon.com/ecs/v2/clusters)에서 `cluster-for-{project_name}` → `service-for-{project_name}` → **Tasks** 탭에서 확인할 수 있습니다.
-
-실제 실행 시 결과는 아래와 같습니다.
-
-<img width="600" src="https://github.com/user-attachments/assets/2ca72116-0077-48a0-94be-3ab15334e4dd" />
-
 ### Local에서 실행하기
 
 AWS 환경을 잘 활용하기 위해서는 [AWS CLI를 설치](https://docs.aws.amazon.com/ko_kr/cli/v1/userguide/cli-chap-install.html)하여야 합니다. CloudShell 또는 ECS 배포 환경에서는 AWS CLI가 기본 제공되는 경우가 많습니다. 로컬에 설치할 때는 아래 명령어를 참조합니다.
