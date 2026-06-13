@@ -1,0 +1,36 @@
+FROM --platform=linux/amd64 python:3.13-slim
+
+WORKDIR /app
+
+# Install Node.js and npm (for npx)
+RUN apt-get update && \
+    apt-get install -y curl && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install streamlit==1.41.0 streamlit-chat streamlit-paste-button pandas numpy boto3 
+RUN pip install langchain_aws langchain langchain_community langchain_experimental langchain-text-splitters
+RUN pip install mcp 
+RUN pip install aioboto3 opensearch-py
+RUN pip install tavily-python==0.5.0 pytz==2024.2 beautifulsoup4==4.12.3
+RUN pip install plotly_express==0.4.1 matplotlib==3.10.0 pytrials
+RUN pip install PyPDF2==3.0.1 requests uv kaleido diagrams arxiv graphviz sarif-om==1.0.4
+RUN pip install rich>=14.0.0 bedrock-agentcore
+RUN pip install strands-agents==1.42.0 strands-agents-tools==0.8.0 colorama finance-datareader
+
+RUN mkdir -p /root/.streamlit
+COPY config.toml /root/.streamlit/
+
+COPY . .
+
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+EXPOSE 8501
+
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["python", "-m", "streamlit", "run", "application/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
