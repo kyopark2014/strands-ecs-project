@@ -419,20 +419,16 @@ pip install boto3
 sudo systemctl start docker   # 로컬 Linux에서 Docker 데몬 실행
 ```
 
-Workshop의 경우 아래 형태의 Credential을 복사하여 CloudShell 또는 로컬 터미널에 입력합니다.
-
-<img width="700" alt="credential" src="https://github.com/user-attachments/assets/261a24c4-8a02-46cb-892a-02fb4eec4551" />
-
 아래와 같이 git source를 가져옵니다.
 
 ```text
-git clone https://github.com/kyopark2014/dwfb-project
+git clone https://github.com/kyopark2014/strands-ecs-project
 ```
 
 `installer.py` 상단의 `project_name`, `region`, `git_name`을 확인한 뒤 설치를 시작합니다.
 
 ```text
-cd dwfb-project && python3 installer.py
+cd strands-ecs-project && python3 installer.py
 ```
 
 - 이미 ECR에 이미지가 있고 인프라만 갱신할 때: `python3 installer.py --skip-docker-build`
@@ -458,7 +454,7 @@ python uninstaller.py
 애플리케이션 코드를 변경한 뒤 다시 배포하려면 **Docker 이미지를 재빌드**하고 ECS 서비스를 갱신합니다. 가장 간단한 방법은 `installer.py`를 다시 실행하는 것입니다.
 
 ```text
-cd dwfb-project && python3 installer.py
+cd strands-ecs-project && python3 installer.py
 ```
 
 `installer.py`는 ECR에 새 이미지를 push하고, ECS 서비스를 새 태스크 정의로 업데이트합니다(`forceNewDeployment`).
