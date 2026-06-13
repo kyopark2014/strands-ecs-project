@@ -25,5 +25,5 @@ uv
 kaleido 
 diagrams 
 reportlab
-strands-agents
-strands-agents-tools
+strands-agents==1.43.0
+strands-agents-tools==0.8.0
