@@ -66,7 +66,23 @@ projectName = config.get("projectName", "strands")
 accountId = config.get("accountId", None)
 knowledge_base_id = config.get('knowledge_base_id', None)
 account_id = config.get("accountId", None)
-user_id = 'agent'
+user_id = None
+
+def set_user_id(new_user_id: str):
+    global user_id, memory_id, actor_id, session_id
+
+    if not new_user_id or not new_user_id.strip():
+        return
+
+    new_user_id = new_user_id.strip()
+    if user_id != new_user_id:
+        user_id = new_user_id
+        memory_id = actor_id = session_id = None
+        mcp_env = utils.load_mcp_env()
+        mcp_env["user_id"] = user_id
+        utils.save_mcp_env(mcp_env)
+        logger.info(f"user_id updated: {user_id}")
+        initiate()
 
 if accountId is None:
     raise Exception ("No accountId")
@@ -108,10 +124,10 @@ def get_max_output_tokens(model_id: str = "") -> int:
         return 64000
     return 8192
 
-def update(modelName, reasoningMode, debugMode, skillMode):    
-    global model_name, model_id, model_type, reasoning_mode, debug_mode, skill_mode
+def update(modelName, reasoningMode, debugMode, skillMode, memoryMode="Disable"):
+    global model_name, model_id, model_type, reasoning_mode, debug_mode, skill_mode, enable_memory
 
-    # load mcp.env    
+    # load mcp.env
     mcp_env = utils.load_mcp_env()
     
     if model_name != modelName:
@@ -134,7 +150,11 @@ def update(modelName, reasoningMode, debugMode, skillMode):
         logger.info(f"skill_mode: {skill_mode}")
         mcp_env['skill_mode'] = skill_mode
 
-    # update mcp.env    
+    if enable_memory != memoryMode:
+        enable_memory = memoryMode
+        logger.info(f"enable_memory: {enable_memory}")
+
+    # update mcp.env
     mcp_env['user_id'] = user_id
     utils.save_mcp_env(mcp_env)
     logger.info(f"mcp.env updated: {mcp_env}")
@@ -251,21 +271,24 @@ def traslation(chat, text, input_language, output_language):
     return msg[msg.find('<result>')+8:len(msg)-9] # remove <result> tag
 
 def initiate():
-    global memory_chain, map_chain, user_id
+    global memory_chain, map_chain
 
-    user_id = uuid.uuid4().hex
-    
-    # general conversation memory
-    if user_id in map_chain:  
+    effective_user_id = user_id if user_id and str(user_id).strip() else "agent"
+    logger.info(f"initiate for user_id: {effective_user_id}")
+
+    if effective_user_id in map_chain:
         logger.info(f"memory exist. reuse it!")
-        memory_chain = map_chain[user_id]
-    else: 
+        memory_chain = map_chain[effective_user_id]
+    else:
         logger.info(f"memory not exist. create new memory!")
         memory_chain = SimpleMemory(k=5)
-        map_chain[user_id] = memory_chain
+        map_chain[effective_user_id] = memory_chain
 
 def clear_chat_history():
     global memory_chain
+
+    effective_user_id = user_id if user_id and str(user_id).strip() else "agent"
+
     # Initialize memory_chain if it doesn't exist
     if memory_chain is None:
         initiate()
@@ -274,7 +297,7 @@ def clear_chat_history():
         memory_chain.chat_memory.clear()
     else:
         memory_chain = SimpleMemory(k=5)
-    map_chain[user_id] = memory_chain
+    map_chain[effective_user_id] = memory_chain
 
 def save_chat_history(text, msg):
     global memory_chain
@@ -1698,3 +1721,55 @@ def summarize_image(image_content, prompt, st):
     logger.info(f"image contents: {contents}")
 
     return contents
+
+#########################################################
+# AgentCore Memory
+#########################################################
+import agentcore_memory
+
+enable_memory = "Disable"
+
+memory_id = actor_id = session_id = None
+
+
+def initiate_memory():
+    global memory_id, actor_id, session_id
+
+    effective_user_id = user_id if user_id and str(user_id).strip() else "agent"
+    if not effective_user_id or not effective_user_id.strip():
+        effective_user_id = "default"
+    logger.info(f"Using user_id: {effective_user_id}")
+
+    memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(effective_user_id)
+    logger.info(f"memory_id: {memory_id}, actor_id: {actor_id}, session_id: {session_id}, namespace: {namespace}")
+
+    if memory_id is None:
+        memory_id = agentcore_memory.retrieve_memory_id()
+        logger.info(f"memory_id: {memory_id}")
+
+        if memory_id is None:
+            logger.info("Memory will be created...")
+            memory_id = agentcore_memory.create_memory(namespace, effective_user_id)
+            logger.info(f"Memory was created... {memory_id}")
+
+        agentcore_memory.create_strategy_if_not_exists(
+            memory_id=memory_id,
+            namespace=namespace,
+            strategy_name=effective_user_id,
+        )
+
+        agentcore_memory.update_memory_variables(
+            user_id=effective_user_id,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            namespace=namespace,
+        )
+
+
+def save_to_memory(query, result):
+    if enable_memory != "Enable":
+        return
+    if memory_id is None:
+        initiate_memory()
+    agentcore_memory.save_conversation_to_memory(memory_id, actor_id, session_id, query, result)

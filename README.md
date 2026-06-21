@@ -1,10 +1,79 @@
-# Agentic AI - Strands 
+# Strands ECS Agent with AgentCore Memory
 
-여기에서는 [Strands agent](https://strandsagents.com/0.1.x/)를 이용해 Agentic AI를 구현하는것을 설명합니다. Strands Agent는 AI agent 구축 및 실행을 위해 설계된 오픈소스 SDK입니다. 계획(planning), 사고 연결(chaining thoughts), 도구 호출, Reflection과 같은 agent 기능을 쉽게 활용할 수 있습니다. 이를 통해 LLM model과 tool을 연결하며, 모델의 추론 능력을 이용하여 도구를 계획하고 실행합니다. 현재 Amazon Bedrock, Anthropic, Meta의 모델을 지원하며, Accenture, Anthropic, Meta와 같은 기업들이 참여하고 있습니다. 
+[Amazon Bedrock AgentCore Memory](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-getting-started.html)를 활용하여 Strands Agent에서 단기/장기 메모리를 구현합니다. 여기에서는 [Strands agent](https://strandsagents.com/0.1.x/)를 이용해 Agentic AI를 구현하는 방법을 설명합니다. Strands Agent는 AI agent 구축 및 실행을 위해 설계된 오픈소스 SDK입니다. 계획(planning), 사고 연결(chaining thoughts), 도구 호출, Reflection과 같은 agent 기능을 쉽게 활용할 수 있습니다.
 
-여기에서 사용하는 architecture는 아래와 같습니다. Agent의 기본동작 확인 및 구현을 위해 **ECS Fargate**에 Docker 컨테이너 형태로 탑재되어 ALB와 CloudFront를 이용해 사용자가 Streamlit으로 동작을 테스트할 수 있습니다. 컨테이너 이미지는 **ECR**에 저장되며, `installer.py`가 Dockerfile을 빌드하여 push합니다. Agent가 생성하는 그림이나 문서는 S3를 이용해 공유될 수 있으며, 컨테이너에 내장된 MCP server/client를 이용해 인터넷검색(Tavily), RAG(knowledge base), AWS tools(use-aws), AWS Document를 이용할 수 있습니다.
+Agent의 기본 동작 확인 및 구현을 위해 **ECS Fargate**에 Docker 컨테이너 형태로 탑재되어 ALB와 CloudFront를 이용해 Streamlit으로 테스트할 수 있습니다. `installer.py`가 AgentCore Memory IAM Role·Memory 인스턴스·Knowledge Base·ECS 인프라를 자동 배포합니다. User ID별로 대화·메모리를 분리하며, MCP(`short term memory`, `long term memory`)로 에이전트가 필요 시 메모리를 조회합니다.
+
+<img width="813" height="372" alt="memory" src="https://github.com/user-attachments/assets/a934f5f1-7133-4e9e-bbc8-d3ca5438a5f4" />
 
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/66ebfed9-6209-4bab-a33d-e91250eb68e7" />
+
+
+## Memory
+
+Chatbot은 연속적인 사용자의 대화를 이용하여 사용자의 경험을 향상시킬 수 있습니다. 일반 대화형 chatbot에서는 이전 대화를 [sliding window](https://langchain-ai.github.io/langgraph/concepts/memory/) 형태로 context에 포함하므로 사용할 수 있는 대화의 숫자가 제한됩니다. 여기에서는 short/long term memory를 지원하는 MCP와 AgentCore Memory를 이용하여 필요할 때마다 메모리를 조회·저장합니다.
+
+[AgentCore Memory](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-getting-started.html)를 이용하면 별도의 DB 없이 short/long term memory를 손쉽게 활용할 수 있습니다. 대화 transaction은 short-term memory에 저장되고, strategy가 추출한 구조화된 기억은 long-term memory에 namespace로 저장됩니다.
+
+### Short Term Memory
+
+대화 transaction은 [agentcore_memory.py](./application/agentcore_memory.py)의 `save_conversation_to_memory()`로 저장합니다.
+
+```python
+memory_result = memory_client.create_event(
+    memory_id=memory_id,
+    actor_id=actor_id,
+    session_id=session_id,
+    event_timestamp=event_timestamp,
+    messages=conversation
+)
+```
+
+[mcp_server_short_term_memory.py](./application/mcp_server_short_term_memory.py)의 `list_events`로 최근 대화를 조회합니다.
+
+### Long Term Memory
+
+[mcp_server_long_term_memory.py](./application/mcp_server_long_term_memory.py)의 `long_term_memory` 도구로 record/retrieve/list/get/delete를 수행합니다. 사용자별 변수는 `user_{user_id}.json`에 저장됩니다.
+
+## 사전 설치 (Prerequisites)
+
+```bash
+pip install bedrock-agentcore
+python installer.py --project-name strands-ecs --region us-west-2
+```
+
+`installer.py`가 수행하는 Memory 관련 작업:
+
+1. AgentCore Memory용 IAM Role 생성
+2. AgentCore Memory 인스턴스 생성 (`memory_id`를 `application/config.json`에 저장)
+3. ECS Fargate·Knowledge Base·AgentCore Web Search Gateway 등 인프라 배포
+
+## Memory 초기화 흐름
+
+앱 실행 시 [app.py](./application/app.py)에서 User ID를 입력하고, Agent 모드에서 **Memory** 체크박스가 켜져 있으면 응답 후 `chat.save_to_memory()`가 호출됩니다.
+
+```
+User ID 입력 → chat.set_user_id() → mcp.env 저장
+Agent 응답 + Memory Enable → save_to_memory() → agentcore_memory.save_conversation_to_memory()
+```
+
+## 주요 변수
+
+| 파일 | 변수 | 설명 |
+|------|------|------|
+| `config.json` | `agentcore_memory_role`, `memory_id` | 프로젝트 Memory 설정 |
+| `user_{user_id}.json` | `memory_id`, `actor_id`, `session_id`, `namespace` | 사용자별 Memory |
+| `mcp.env` | `user_id` | MCP memory 서버용 사용자 ID |
+
+## MCP를 이용한 메모리 활용
+
+[mcp_config.py](./application/mcp_config.py)에서 `short term memory`, `long term memory`를 선택하면 stdio MCP 서버가 연결됩니다.
+
+| 구분 | 단기 메모리 | 장기 메모리 |
+|------|-----------|-----------|
+| 데이터 | 원본 대화 이벤트 | strategy가 추출한 구조화된 기억 |
+| MCP 도구 | `list_events` | `long_term_memory` (record/retrieve/list/get/delete) |
+| 파일 | `mcp_server_short_term_memory.py` | `mcp_server_long_term_memory.py` |
 
 
 Strands agent는 아래와 같은 [Agent Loop](https://strandsagents.com/0.1.x/user-guide/concepts/agents/agent-loop/)을 가지고 있으므로, 적절한 tool을 선택하여 실행하고, reasoning을 통해 반복적으로 필요한 동작을 수행합니다. 
@@ -26,8 +95,16 @@ agent = Agent(
 ```mermaid
 flowchart TB
   subgraph UI["Streamlit (app.py)"]
+    UID[User ID 입력]
+    MEMCHK[Memory on/off]
     M[Agent]
     SKUI[Skill / Strands Tool / MCP 선택]
+  end
+
+  subgraph MemoryStack["AgentCore Memory"]
+    STM[Short-term: create_event / list_events]
+    LTM[Long-term: strategy 추출 / retrieve]
+    UJSON["user_{user_id}.json"]
   end
 
   subgraph LLM["Amazon Bedrock"]
@@ -51,19 +128,25 @@ flowchart TB
   end
 
   subgraph MCPServers["MCP Servers (mcp_config.py)"]
+    STMCP[short-term memory]
+    LTMCP[long-term memory]
     T[tavily]
     R[retrieve]
     AWS[aws documentation]
-    WF[web_fetch / korea_weather / trade_info]
+    WF[web_fetch / korea_weather / trade_info / websearch]
   end
 
-  subgraph Storage["Artifacts / S3"]
+  subgraph Storage["Artifacts / S3 / ECS"]
     ART[artifacts/]
     S3[(S3)]
+    ECS[ECS Fargate]
   end
 
+  UID --> RSA
+  MEMCHK -->|save_to_memory| STM
   M --> RSA
   SKUI -->|skill_list| BSP
+  SKUI -->|mcp_servers| MCP
 
   RSA --> A
   A --> SA
@@ -76,6 +159,12 @@ flowchart TB
   BSP -->|system_prompt| A
   GSI --> SRC
   MCP --> MCPServers
+  MCP --> STMCP
+  MCP --> LTMCP
+  STMCP --> STM
+  LTMCP --> LTM
+  STM --> UJSON
+  LTM --> UJSON
   BT --> ART
   BT --> S3
 ```

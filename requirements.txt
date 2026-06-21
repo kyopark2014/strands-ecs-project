@@ -4,6 +4,7 @@ streamlit-paste-button
 pandas 
 numpy 
 boto3
+bedrock-agentcore
 langchain_aws 
 langchain 
 langchain_community 

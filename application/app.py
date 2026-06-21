@@ -28,6 +28,26 @@ config = utils.load_config()
 # title
 st.set_page_config(page_title='Agent', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
 
+
+@st.dialog("User ID 입력")
+def request_user_id() -> None:
+    st.markdown("시작하려면 User ID를 입력하세요.")
+    user_id = st.text_input("User ID", key="user_id_input", placeholder="예: user01")
+    if st.button("시작", type="primary", use_container_width=True):
+        if user_id.strip():
+            st.session_state.user_id = user_id.strip()
+            chat.set_user_id(user_id.strip())
+            st.rerun()
+        else:
+            st.error("User ID를 입력해주세요.")
+
+
+if not st.session_state.get("user_id"):
+    request_user_id()
+    st.stop()
+
+chat.set_user_id(st.session_state.user_id)
+
 mode_descriptions = {
     "일상적인 대화": [
         "대화이력을 바탕으로 챗봇과 일상의 대화를 편안히 즐길수 있습니다."
@@ -61,7 +81,9 @@ with st.sidebar:
         '이미지 분석'
     ] 
     mode = st.radio(label="원하는 대화 형태를 선택하세요. ", options=options, index=2)   
-    st.info(mode_descriptions[mode][0])    
+    st.info(mode_descriptions[mode][0])
+
+    st.caption(f"User ID: {st.session_state.user_id}")
 
     strands_tools = ["current_time", "file_read", "file_write", "http_request"] 
     default_strands_tool_selections = ["current_time", "file_read", "file_write"]    
@@ -75,11 +97,13 @@ with st.sidebar:
         "web_fetch",
         "websearch",
         "korea_weather",
+        "short term memory",
+        "long term memory",
         "사용자 설정"
     ]
 
     mcp_selections = {}
-    default_mcp_selections = ["korea_weather", "web_fetch", "websearch", "tavily"]
+    default_mcp_selections = ["korea_weather", "web_fetch", "websearch", "tavily", "long term memory"]
 
     # Default: prevent strands_selections undefined when not in Agent mode
     default_strands_tool_selections = config.get("default_strands_tool_selections") or default_strands_tool_selections
@@ -208,6 +232,10 @@ with st.sidebar:
     # debug checkbox
     select_debugMode = st.checkbox('Debug Mode', value=True)
     debugMode = 'Enable' if select_debugMode else 'Disable'
+
+    # Memory
+    enable_memory = st.checkbox('Memory', value=True)
+    memoryMode = 'Enable' if enable_memory else 'Disable'
     
     # extended thinking of claude 3.7 sonnet
     reasoningMode = 'Disable'
@@ -243,7 +271,7 @@ with st.sidebar:
     selected_strands_tools = [tool for tool, is_selected in strands_selections.items() if is_selected]
     selected_mcp_servers = [server for server, is_selected in mcp_selections.items() if is_selected]
     
-    chat.update(modelName, reasoningMode, debugMode, skillMode)
+    chat.update(modelName, reasoningMode, debugMode, skillMode, memoryMode)
 
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")
@@ -433,6 +461,9 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                     mcp_servers=selected_mcp_servers, 
                     skill_list=skill_list,
                     notification_queue=notification_queue))
+
+            if memoryMode == "Enable":
+                chat.save_to_memory(prompt, response)
 
         if chat.debug_mode == 'Disable':
            st.markdown(response)

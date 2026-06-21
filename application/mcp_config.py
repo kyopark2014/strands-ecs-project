@@ -26,6 +26,10 @@ mcp_user_config = {}
 def load_config(mcp_type):
     if mcp_type == "aws documentation":
         mcp_type = 'aws_documentation'
+    elif mcp_type == "short term memory":
+        mcp_type = "short-term-memory"
+    elif mcp_type == "long term memory":
+        mcp_type = "long-term-memory"
 
     if mcp_type == "aws_documentation":
         return {
@@ -103,6 +107,26 @@ def load_config(mcp_type):
                 "korea-weather": {
                     "command": "python",
                     "args": [f"{workingDir}/mcp_server_korea_weather.py"]
+                }
+            }
+        }
+
+    elif mcp_type == "short-term-memory":
+        return {
+            "mcpServers": {
+                "short-term memory": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_short_term_memory.py"]
+                }
+            }
+        }
+
+    elif mcp_type == "long-term-memory":
+        return {
+            "mcpServers": {
+                "long-term memory": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_long_term_memory.py"]
                 }
             }
         }
