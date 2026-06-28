@@ -599,7 +599,6 @@ if "event_loop_metrics" in event and \
 | `[9/10]` | ECS Fargate deploy |
 | `[10/10]` | Application readiness check |
 
-### CloudShell 또는 로컬에서 배포
 
 AWS console의 CloudShell을 접속하거나, Docker가 설치된 로컬 환경에서 아래와 같이 준비합니다.
 
