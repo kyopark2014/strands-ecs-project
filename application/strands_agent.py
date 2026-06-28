@@ -23,6 +23,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 from botocore.config import Config
 from strands import Agent, tool, AgentSkills, Skill
 from urllib import parse
+from strands.session.file_session_manager import FileSessionManager
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -679,6 +680,21 @@ conversation_manager = SlidingWindowConversationManager(
     window_size=50,  
 )
 
+DEFAULT_SESSION_STORAGE_DIR = "/mnt/workspace"
+
+
+def get_session_storage_dir() -> str:
+    """Return session storage path (S3 Files mount on ECS, or config override)."""
+    return (config.get("s3_files_mount_path") or DEFAULT_SESSION_STORAGE_DIR).rstrip("/")
+
+
+def get_runtime_session_id() -> str:
+    """Return session id for FileSessionManager."""
+    session_id = getattr(chat, "runtime_session_id", None)
+    if session_id:
+        return session_id
+    return chat.ensure_runtime_session_id()
+
 
 @contextlib.asynccontextmanager
 async def _streamable_http_with_auth(
@@ -738,6 +754,7 @@ class MCPClientManager:
         url: str,
         headers: dict[str, str] = {},
         auth_region: str | None = None,
+        auth_service: str | None = None,
     ) -> None:
         """Add a new MCP client configuration (lazy initialization)"""
         self.client_configs[name] = {
@@ -745,6 +762,7 @@ class MCPClientManager:
             "url": url,
             "headers": headers,
             "auth_region": auth_region,
+            "auth_service": auth_service,
         }
     
     def get_client(self, name: str) -> Optional[MCPClient]:
@@ -765,7 +783,10 @@ class MCPClientManager:
                         auth_region = config.get("auth_region")
                         if auth_region:
                             import agentcore_sigv4_auth
-                            auth = agentcore_sigv4_auth.AgentCoreSigV4Auth(region=auth_region)
+                            auth = agentcore_sigv4_auth.AgentCoreSigV4Auth(
+                                region=auth_region,
+                                service=config.get("auth_service", "bedrock-agentcore"),
+                            )
                             self.clients[name] = MCPClient(
                                 lambda u=url, a=auth: _streamable_http_with_auth(
                                     u, a, terminate_on_close=True
@@ -996,12 +1017,20 @@ def init_mcp_clients(mcp_servers: list):
             url = server_config["url"]
             headers = server_config.get("headers", {})
             auth_region = None
+            auth_service = None
             if server_config.get("auth_type") == "aws_sigv4":
                 auth_region = server_config.get("auth_region", "us-east-1")
+                auth_service = server_config.get("auth_service", "bedrock-agentcore")
             logger.info(f"Adding MCP client - name: {name}, url: {url}, headers: {headers}")
                 
             try:                
-                mcp_manager.add_streamable_client(name, url, headers, auth_region=auth_region)
+                mcp_manager.add_streamable_client(
+                    name,
+                    url,
+                    headers,
+                    auth_region=auth_region,
+                    auth_service=auth_service,
+                )
                 logger.info(f"Successfully added streamable MCP client for {name}")
             except Exception as e:
                 logger.error(f"Failed to add streamable MCP client for {name}: {e}")
@@ -1105,12 +1134,18 @@ def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: l
         if skills_sources:
             skills_plugin = AgentSkills(skills=skills_sources)
 
+    session_manager = FileSessionManager(
+        session_id=get_runtime_session_id(),
+        storage_dir=get_session_storage_dir(),
+    )
+
     agent = Agent(
         model=model,
         system_prompt=BASE_SYSTEM_PROMPT,
         tools=tools,
         plugins=[skills_plugin] if skills_plugin else [],
         conversation_manager=conversation_manager,
+        session_manager=session_manager,
     )
 
     return agent
@@ -1131,6 +1166,8 @@ selected_strands_tools = []
 selected_mcp_servers = []
 selected_skill_list = []
 selected_skill_mode = None
+selected_session_id = None
+agent = None
 
 async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: list[str], skill_list: list[str], notification_queue):
     """Run the strands agent with streaming and tool notifications."""
@@ -1140,19 +1177,23 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
     image_url = []
     references = []
 
-    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode
+    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id
 
     current_skill_mode = chat.skill_mode
+    current_session_id = get_runtime_session_id()
     if (
         selected_strands_tools != strands_tools
         or selected_mcp_servers != mcp_servers
         or selected_skill_list != skill_list
         or selected_skill_mode != current_skill_mode
+        or selected_session_id != current_session_id
+        or agent is None
     ):
-        selected_strands_tools = strands_tools
-        selected_mcp_servers = mcp_servers
-        selected_skill_list = skill_list
+        selected_strands_tools = list(strands_tools)
+        selected_mcp_servers = list(mcp_servers)
+        selected_skill_list = list(skill_list)
         selected_skill_mode = current_skill_mode
+        selected_session_id = current_session_id
         
         mcp_manager.stop_agent_clients()
         

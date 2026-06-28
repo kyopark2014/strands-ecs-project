@@ -6,7 +6,6 @@ import boto3
 import os
 import asyncio
 import re
-from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -16,11 +15,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("mcp-basic")
-
-aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
-aws_region = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
 
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
@@ -108,50 +102,6 @@ def save_mcp_env(mcp_env):
     
     with open(mcp_env_path, "w", encoding="utf-8") as f:
         json.dump(mcp_env, f)
-
-# api key to get weather information in agent
-if aws_access_key and aws_secret_key:
-    secretsmanager = boto3.client(
-        service_name='secretsmanager',
-        region_name=bedrock_region,
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key,
-        aws_session_token=aws_session_token,
-    )
-else:
-    secretsmanager = boto3.client(
-        service_name='secretsmanager',
-        region_name=bedrock_region
-    )
-
-# api key for Tavily: Secrets Manager → config.json TAVILY_API_KEY → env TAVILY_API_KEY
-# mcp_config passes utils.tavily_key into the tavily-mcp subprocess env (not the whole os.environ).
-tavily_key = ""
-tavily_api_wrapper = ""
-try:
-    get_tavily_api_secret = secretsmanager.get_secret_value(
-        SecretId=f"tavilyapikey-{projectName}"
-    )
-    secret = json.loads(get_tavily_api_secret["SecretString"])
-    raw = (secret.get("tavily_api_key") or "").strip()
-    if raw:
-        tavily_key = raw
-except Exception as e:
-    logger.warning(
-        "Tavily AWS secret unavailable (%s). Using config/env TAVILY_API_KEY if set (secret id: tavilyapikey-%s).",
-        e,
-        projectName,
-    )
-
-if not tavily_key:
-    tavily_key = (
-        (config.get("TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY") or "")
-        .strip()
-    )
-
-if tavily_key:
-    os.environ["TAVILY_API_KEY"] = tavily_key
-    tavily_api_wrapper = TavilySearchAPIWrapper(tavily_api_key=tavily_key)
 
 def sanitize_data_source_name(name):
     """

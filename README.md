@@ -46,7 +46,7 @@ python installer.py --project-name strands-ecs --region us-west-2
 
 1. AgentCore Memory용 IAM Role 생성
 2. AgentCore Memory 인스턴스 생성 (`memory_id`를 `application/config.json`에 저장)
-3. ECS Fargate·Knowledge Base·AgentCore Web Search Gateway 등 인프라 배포
+3. ECS Fargate·Knowledge Base·AgentCore Web Search Gateway·**S3 Files 세션 스토리지** 등 인프라 배포
 
 ## Memory 초기화 흐름
 
@@ -63,6 +63,7 @@ Agent 응답 + Memory Enable → save_to_memory() → agentcore_memory.save_conv
 |------|------|------|
 | `config.json` | `agentcore_memory_role`, `memory_id` | 프로젝트 Memory 설정 |
 | `user_{user_id}.json` | `memory_id`, `actor_id`, `session_id`, `namespace` | 사용자별 Memory |
+| `config.json` | `s3_files_*`, `s3_files_mount_path` | S3 Files 세션 스토리지 |
 | `mcp.env` | `user_id` | MCP memory 서버용 사용자 ID |
 
 ## MCP를 이용한 메모리 활용
@@ -74,6 +75,206 @@ Agent 응답 + Memory Enable → save_to_memory() → agentcore_memory.save_conv
 | 데이터 | 원본 대화 이벤트 | strategy가 추출한 구조화된 기억 |
 | MCP 도구 | `list_events` | `long_term_memory` (record/retrieve/list/get/delete) |
 | 파일 | `mcp_server_short_term_memory.py` | `mcp_server_long_term_memory.py` |
+
+## Session Management & S3 Files
+
+ECS Fargate 컨테이너 안에서 Strands Agent가 **대화 이력·agent state**를 유지하기 위해 **Amazon S3 Files**를 `/mnt/workspace`에 마운트하고, Strands **`FileSessionManager`**가 해당 경로에 세션을 저장합니다. AgentCore Memory(MCP)와 별개로, Strands SDK의 **session storage**가 Agent 대화 컨텍스트를 영속화합니다.
+
+상세 동작은 [strands-runtime/session-management.md](../strands-runtime/session-management.md)와 동일한 Strands SDK 패턴을 따르며, 이 프로젝트는 **AgentCore Runtime 대신 ECS 태스크**에 S3 Files volume을 붙입니다.
+
+### 한 줄 요약
+
+| 매니저 | 역할 | 저장 위치 |
+|---|---|---|
+| `conversation_manager` | 모델에 보낼 메시지 **개수/크기 제한** (슬라이딩 윈도우) | 프로세스 메모리 (상태는 session에도 동기화) |
+| `session_manager` | 전체 대화·agent state **디스크 저장/복원** | `/mnt/workspace/session_<id>/...` (S3 Files → S3 bucket) |
+
+```
+[전체 대화 히스토리]  ← session_manager가 S3 Files(/mnt/workspace)에 저장
+        ↓
+[슬라이딩 윈도우 50 messages] ← conversation_manager가 모델에 전달할 부분만 선택
+        ↓
+      LLM 호출
+```
+
+### Session ID (Streamlit 로그인)
+
+[strands-runtime/application/app.py](../strands-runtime/application/app.py)와 같이 User ID 로그인 후 **Session ID**를 관리합니다.
+
+| 단계 | 동작 |
+|---|---|
+| **로그인** | User ID 입력 → `chat.set_user_id()` → `runtime_session_id = uuid5("agentcore-session-{user_id}")` (재접속 시 동일) |
+| **대화 초기화** | `chat.initiate()` → 새 `runtime_session_id`(uuid4) → Agent 재생성 |
+| **Agent** | `FileSessionManager(session_id=chat.runtime_session_id, storage_dir="/mnt/workspace")` |
+
+[app.py](./application/app.py) 사이드바에 **User ID**, **Session ID**가 표시됩니다. [chat.py](./application/chat.py)의 `runtime_session_id_for()`는 strands-runtime [agentcore_client.py](../strands-runtime/application/agentcore_client.py)와 동일한 deterministic UUID 규칙을 사용합니다.
+
+### 코드 구조 ([strands_agent.py](./application/strands_agent.py))
+
+**conversation_manager** — 모듈 레벨 싱글톤, `window_size=50` (**메시지 개수** 기준, turn 수 아님)
+
+```python
+conversation_manager = SlidingWindowConversationManager(window_size=50)
+```
+
+**session_manager** — `create_agent()`마다 생성
+
+```python
+from strands.session.file_session_manager import FileSessionManager
+
+session_manager = FileSessionManager(
+    session_id=get_runtime_session_id(),  # chat.runtime_session_id
+    storage_dir=get_session_storage_dir(),  # /mnt/workspace
+)
+
+agent = Agent(
+    model=model,
+    system_prompt=BASE_SYSTEM_PROMPT,
+    tools=tools,
+    plugins=[skills_plugin] if skills_plugin else [],
+    conversation_manager=conversation_manager,
+    session_manager=session_manager,
+)
+```
+
+`run_strands_agent()`는 tool/MCP/skill 설정 또는 **session_id 변경** 시 Agent를 재생성하고, `session_manager.initialize()`로 디스크에서 대화를 복원합니다.
+
+#### window_size 참고
+
+| 흐름 | `agent.messages`에 추가되는 메시지 |
+|---|---|
+| `request → response` (tool 없음) | **2** (`user` + `assistant`) |
+| `request → toolUse → toolResult → response` | **4** |
+
+디스크에는 전체 대화가 저장되고, 모델에는 최근 **50개 메시지**만 전달됩니다.
+
+### 디스크 저장 구조
+
+```
+/mnt/workspace/
+└── session_<session_id>/
+    ├── session.json
+    └── agents/
+        └── agent_<agent_id>/
+            ├── agent.json          # state, conversation_manager_state 등
+            └── messages/
+                ├── message_0.json
+                └── ...
+```
+
+S3 측 동기화 경로 (버킷 prefix `agentcore-sessions/`):
+
+```text
+s3://storage-for-{project_name}-{account_id}-{region}/
+  agentcore-sessions/
+    session_<session_id>/
+      session.json
+      agents/agent_default/...
+```
+
+### S3 Files on ECS Fargate
+
+[strands-runtime](../strands-runtime)은 AgentCore Runtime에 S3 Files를 마운트합니다. **이 프로젝트**는 동일한 S3 Files 인프라를 프로비저닝하되, **ECS Fargate 태스크 정의**의 `s3filesVolumeConfiguration`으로 컨테이너에 마운트합니다.
+
+```mermaid
+flowchart TB
+    subgraph ecs ["ECS Fargate (private subnet)"]
+        APP["Streamlit + strands_agent.py"]
+        FM["FileSessionManager\n/mnt/workspace"]
+        APP --> FM
+    end
+
+    subgraph nfs ["S3 Files (NFS 2049)"]
+        AP[Access Point]
+        MT[Mount Targets]
+        FS[File System]
+        AP --> MT --> FS
+    end
+
+    subgraph s3 ["S3 Bucket"]
+        PREFIX["agentcore-sessions/\nsession_&lt;id&gt;/..."]
+    end
+
+    FM -->|파일 I/O| AP
+    FS -->|비동기 동기화| PREFIX
+```
+
+| 항목 | strands-runtime (AgentCore) | strands-ecs-project (ECS) |
+|---|---|---|
+| 마운트 방식 | `filesystemConfigurations.s3FilesAccessPoint` | ECS task `s3filesVolumeConfiguration` |
+| 마운트 경로 | `/mnt/workspace` | `/mnt/workspace` (동일) |
+| session_id | `BedrockAgentCoreContext.get_session_id()` | `chat.runtime_session_id` (User ID 기반) |
+| IAM | Runtime 실행 역할 | **ECS task role** |
+| 네트워크 | Runtime VPC + SG(2049) | ECS task SG + mount target SG(2049) |
+
+#### installer 프로비저닝 (`[5.5/10]`)
+
+[installer.py](./installer.py)의 `create_s3_files_session_storage()`가 **멱등**으로 생성합니다.
+
+1. **Sync IAM role** — `role-s3files-sync-for-{project_name}`
+2. **S3 bucket versioning** — `Enabled` (S3 Files 필수)
+3. **File system** — bucket + prefix `agentcore-sessions/`
+4. **Security groups** — ECS SG ↔ mount target SG (TCP **2049**)
+5. **Mount targets** — private subnet별
+6. **Access point** — POSIX `uid/gid: 0/0`
+7. **File system policy** — ECS task role에 NFS mount/write 허용
+8. **ECS task definition** — volume + `mountPoints` → `/mnt/workspace`
+
+`application/config.json`에 기록되는 키:
+
+| 키 | 설명 |
+|---|---|
+| `s3_files_file_system_id` | S3 Files file system ID |
+| `s3_files_access_point_arn` | Access point ARN |
+| `s3_files_mount_path` | `/mnt/workspace` |
+| `ecs_session_vpc_subnets` | ECS 태스크 subnet 목록 |
+| `ecs_session_security_groups` | ECS task security group |
+
+ECS 태스크 정의 예 ([installer.py](./installer.py)):
+
+```python
+"volumes": [{
+    "name": "session-storage",
+    "s3filesVolumeConfiguration": {
+        "fileSystemArn": file_system_arn,
+        "accessPointArn": access_point_arn,
+        "rootDirectory": "/",
+    },
+}],
+"mountPoints": [{
+    "sourceVolume": "session-storage",
+    "containerPath": "/mnt/workspace",
+    "readOnly": False,
+}],
+```
+
+#### ECS task role IAM (S3 Files)
+
+`attach_ecs_task_s3files_policy()`가 task role에 아래 권한을 추가합니다.
+
+- `s3files:ClientMount`, `ClientWrite`, `ClientRootAccess` (file system ARN + access point 조건)
+- `s3files:GetAccessPoint` (access point ARN)
+- `s3files:ListMountTargets` (file system ARN)
+
+#### 재시작·배포 시 동작
+
+| 시나리오 | 동작 |
+|---|---|
+| **같은 User ID로 재접속** | deterministic session id → S3 Files에서 대화 복원 |
+| **대화 초기화** | 새 session id → 새 `session_<id>/` 디렉터리 |
+| **ECS 태스크 재시작** | `/mnt/workspace`는 S3 Files volume → 세션 유지 |
+| **새 Docker 이미지 배포** | 동일 volume 마운트 → 세션 유지 |
+
+> S3 Files는 NFS 기반이므로 S3 API로 즉시 읽을 때 **동기화 지연(~60초)** 이 있을 수 있습니다. `FileSessionManager`만 사용하는 Agent 세션에는 일반적으로 문제 없습니다.
+
+#### 주의사항
+
+- `session_id`는 User ID·대화 초기화 단위로 고유해야 합니다.
+- `/mnt/workspace`는 ECS task에 S3 Files volume이 마운트되어 있어야 합니다. 로컬 `streamlit run` 시에는 마운트가 없으므로 세션 영속화는 ECS 배포 환경을 기준으로 합니다.
+- mount target AZ·ECS task subnet·SG(2049)가 맞지 않으면 태스크 기동 또는 파일 I/O가 실패할 수 있습니다.
+- 세션 파일은 버킷 루트가 아니라 **`agentcore-sessions/`** prefix 아래에 동기화됩니다.
+
+관련 문서: [strands-runtime/session-management.md](../strands-runtime/session-management.md), [strands-runtime/s3files.md](../strands-runtime/s3files.md)
 
 
 Strands agent는 아래와 같은 [Agent Loop](https://strandsagents.com/0.1.x/user-guide/concepts/agents/agent-loop/)을 가지고 있으므로, 적절한 tool을 선택하여 실행하고, reasoning을 통해 반복적으로 필요한 동작을 수행합니다. 
@@ -136,9 +337,11 @@ flowchart TB
     WF[web_fetch / korea_weather / trade_info / websearch]
   end
 
-  subgraph Storage["Artifacts / S3 / ECS"]
+  subgraph Storage["Artifacts / S3 / ECS / S3 Files"]
     ART[artifacts/]
-    S3[(S3)]
+    S3[(S3 bucket)]
+    S3F["S3 Files\nagentcore-sessions/"]
+    WS["/mnt/workspace\nFileSessionManager"]
     ECS[ECS Fargate]
   end
 
@@ -167,6 +370,9 @@ flowchart TB
   LTM --> UJSON
   BT --> ART
   BT --> S3
+  A --> WS
+  WS --> S3F
+  S3F --> S3
 ```
 
 | 모드 | 모듈 | 설명 |
@@ -254,26 +460,34 @@ async def run_strands_agent(query, strands_tools, mcp_servers, containers):
 
 ### 대화 이력의 활용
 
-대화 내용을 이용해 대화를 이어나가고자 할 경우에 아래와 같이 SlidingWindowConversationManager을 이용해서 window_size만큼 이전 대화를 가져와 활용할 수 있습니다. 상세한 코드는 [chat.py](./application/chat.py)을 참조합니다.
+Strands Agent는 **두 계층**으로 대화를 관리합니다. ([Session Management & S3 Files](#session-management--s3-files) 참조)
+
+1. **`FileSessionManager`** — 전체 대화를 `/mnt/workspace`(S3 Files)에 영속 저장·복원
+2. **`SlidingWindowConversationManager`** — 모델에 전달할 최근 메시지만 in-memory trim
+
+[application/strands_agent.py](./application/strands_agent.py):
 
 ```python
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.session.file_session_manager import FileSessionManager
 
-conversation_manager = SlidingWindowConversationManager(
-    window_size=10,  
+conversation_manager = SlidingWindowConversationManager(window_size=50)
+
+session_manager = FileSessionManager(
+    session_id=get_runtime_session_id(),
+    storage_dir=get_session_storage_dir(),
 )
 
 agent = Agent(
     model=model,
-    system_prompt=system,
-    tools=[    
-        calculator, 
-        current_time,
-        use_aws    
-    ],
-    conversation_manager=conversation_manager
+    system_prompt=BASE_SYSTEM_PROMPT,
+    tools=tools,
+    conversation_manager=conversation_manager,
+    session_manager=session_manager,
 )
 ```
+
+`window_size=50`은 **메시지 50개** 기준입니다 (tool 1회 포함 요청 ≈ 4 messages).
 
 ### MCP 활용
 
@@ -493,7 +707,7 @@ if "event_loop_metrics" in event and \
 | AWS CLI | ECR 로그인 및 자격 증명 |
 | boto3 | `pip install boto3` |
 
-배포 시 생성되는 주요 리소스: ECR (`ecr-for-{project_name}`), ECS Cluster/Service, ALB, CloudFront, VPC, Bedrock Knowledge Base (S3 Vectors)
+배포 시 생성되는 주요 리소스: ECR (`ecr-for-{project_name}`), ECS Cluster/Service (S3 Files volume `/mnt/workspace`), ALB, CloudFront, VPC, Bedrock Knowledge Base (S3 Vectors), **S3 Files** (`agentcore-sessions/` prefix)
 
 상세한 배포 흐름은 [installer.md](./installer.md)를 참조하세요.
 
@@ -520,9 +734,6 @@ cd strands-ecs-project && python3 installer.py
 ```
 
 - 이미 ECR에 이미지가 있고 인프라만 갱신할 때: `python3 installer.py --skip-docker-build`
-- API credential은 Secrets Manager로 관리합니다. 설치 시 Tavily API Key 입력을 요청할 수 있습니다.
-
-- 일반 인터넷 검색: [Tavily Search](https://app.tavily.com/sign-in)에 접속하여 가입 후 API Key를 발급합니다. 이것은 tvly-로 시작합니다.
 
 설치가 완료되면 아래와 같은 CloudFront URL로 접속하여 동작을 확인합니다.
 

@@ -67,9 +67,35 @@ accountId = config.get("accountId", None)
 knowledge_base_id = config.get('knowledge_base_id', None)
 account_id = config.get("accountId", None)
 user_id = None
+runtime_session_id = None
+
+
+def runtime_session_id_for(user_id: str, history_mode: str = "Enable") -> str:
+    """Session id for FileSessionManager (AgentCore runtimeSessionId compatible).
+
+    Enable: deterministic per user_id so history survives restarts.
+    Disable: ephemeral session per conversation reset.
+    """
+    if history_mode == "Enable" and user_id:
+        seed = f"agentcore-session-{user_id}"
+        session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    else:
+        session_id = str(uuid.uuid4())
+    logger.info(f"runtime_session_id: {session_id} (history_mode={history_mode})")
+    return session_id
+
+
+def ensure_runtime_session_id(history_mode: str = "Enable") -> str:
+    """Ensure chat.runtime_session_id is set and return it."""
+    global runtime_session_id
+    if not runtime_session_id:
+        effective_user_id = user_id if user_id and str(user_id).strip() else ""
+        runtime_session_id = runtime_session_id_for(effective_user_id, history_mode)
+    return runtime_session_id
+
 
 def set_user_id(new_user_id: str):
-    global user_id, memory_id, actor_id, session_id
+    global user_id, memory_id, actor_id, session_id, runtime_session_id
 
     if not new_user_id or not new_user_id.strip():
         return
@@ -78,11 +104,12 @@ def set_user_id(new_user_id: str):
     if user_id != new_user_id:
         user_id = new_user_id
         memory_id = actor_id = session_id = None
+        runtime_session_id = runtime_session_id_for(user_id, "Enable")
         mcp_env = utils.load_mcp_env()
         mcp_env["user_id"] = user_id
         utils.save_mcp_env(mcp_env)
-        logger.info(f"user_id updated: {user_id}")
-        initiate()
+        logger.info(f"user_id updated: {user_id}, runtime_session_id: {runtime_session_id}")
+        _init_memory_chain()
 
 if accountId is None:
     raise Exception ("No accountId")
@@ -270,19 +297,28 @@ def traslation(chat, text, input_language, output_language):
 
     return msg[msg.find('<result>')+8:len(msg)-9] # remove <result> tag
 
-def initiate():
+def _init_memory_chain():
     global memory_chain, map_chain
 
     effective_user_id = user_id if user_id and str(user_id).strip() else "agent"
-    logger.info(f"initiate for user_id: {effective_user_id}")
+    logger.info(f"init memory chain for user_id: {effective_user_id}")
 
     if effective_user_id in map_chain:
-        logger.info(f"memory exist. reuse it!")
+        logger.info("memory exist. reuse it!")
         memory_chain = map_chain[effective_user_id]
     else:
-        logger.info(f"memory not exist. create new memory!")
+        logger.info("memory not exist. create new memory!")
         memory_chain = SimpleMemory(k=5)
         map_chain[effective_user_id] = memory_chain
+
+
+def initiate():
+    """Start a new ephemeral agent session (e.g. after '대화 초기화')."""
+    global runtime_session_id
+
+    runtime_session_id = str(uuid.uuid4())
+    logger.info(f"runtime_session_id (new session): {runtime_session_id}")
+    _init_memory_chain()
 
 def clear_chat_history():
     global memory_chain

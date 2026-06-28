@@ -46,6 +46,7 @@ if not st.session_state.get("user_id"):
     st.stop()
 
 chat.set_user_id(st.session_state.user_id)
+chat.ensure_runtime_session_id()
 
 mode_descriptions = {
     "일상적인 대화": [
@@ -83,13 +84,13 @@ with st.sidebar:
     st.info(mode_descriptions[mode][0])
 
     st.caption(f"User ID: {st.session_state.user_id}")
+    st.caption(f"Session ID: {chat.runtime_session_id or chat.ensure_runtime_session_id()}")
 
     strands_tools = ["current_time", "file_read", "file_write", "http_request"] 
     default_strands_tool_selections = ["current_time", "file_read", "file_write"]    
     
     # mcp selection    
     mcp_tools = [
-        "tavily", 
         "RAG", 
         "aws documentation", 
         "trade_info", 
@@ -102,7 +103,7 @@ with st.sidebar:
     ]
 
     mcp_selections = {}
-    default_mcp_selections = ["korea_weather", "web_fetch", "websearch", "tavily", "long term memory"]
+    default_mcp_selections = ["korea_weather", "web_fetch", "websearch", "long term memory"]
 
     # Default: prevent strands_selections undefined when not in Agent mode
     default_strands_tool_selections = config.get("default_strands_tool_selections") or default_strands_tool_selections
@@ -277,9 +278,6 @@ with st.sidebar:
 
 st.title('🔮 '+ mode)  
 
-if clear_button==True:
-    chat.initiate()
-
 # Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -324,6 +322,7 @@ if clear_button or "messages" not in st.session_state:
     
     st.session_state.greetings = False
     
+    chat.initiate()
     chat.clear_chat_history()
     st.rerun()
 

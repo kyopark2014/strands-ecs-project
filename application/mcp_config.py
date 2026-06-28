@@ -1,4 +1,3 @@
-import chat
 import logging
 import sys
 import utils
@@ -15,14 +14,44 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-config")
 
 config = utils.load_config()
-print(f"config: {config}")
+logger.info(f"config: {config}")
 
-aws_region = config["region"] if "region" in config else "us-west-2"
+region = config["region"] if "region" in config else "us-west-2"
 projectName = config["projectName"] if "projectName" in config else "mcp"
 workingDir = os.path.dirname(os.path.abspath(__file__))
 logger.info(f"workingDir: {workingDir}")
 
-mcp_user_config = {}    
+mcp_user_config = {}
+
+
+def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str | None:
+    client = boto3.client("bedrock-agentcore-control", region_name=gateway_region)
+    try:
+        response = client.list_gateways()
+        for item in response.get("items", []):
+            if item.get("name") != gateway_name:
+                continue
+
+            gateway_id = item["gatewayId"]
+            gateway = client.get_gateway(gatewayIdentifier=gateway_id)
+            return gateway["gatewayUrl"].rstrip("/")
+    except Exception as e:
+        logger.error(f"Error resolving AgentCore gateway URL for {gateway_name}: {e}")
+
+    return None
+
+
+def get_websearch_gateway_url() -> str | None:
+    """Prefer installer-provided config.json URL, then resolve via AgentCore Control API."""
+    configured_url = (config.get("agentcore_websearch_gateway_url") or "").strip().rstrip("/")
+    if configured_url:
+        return configured_url
+
+    gateway_name = config.get("agentcore_websearch_gateway_name", "gateway-websearch")
+    gateway_region = config.get("agentcore_websearch_gateway_region", "us-east-1")
+    return get_agentcore_gateway_mcp_url(gateway_name, gateway_region)
+
+
 def load_config(mcp_type):
     if mcp_type == "aws documentation":
         mcp_type = 'aws_documentation'
@@ -54,21 +83,6 @@ def load_config(mcp_type):
             }
         }
 
-    elif mcp_type == "tavily":
-        return {
-            "mcpServers": {
-                "tavily-mcp": {
-                    "command": "npx",
-                    "args": ["-y", "tavily-mcp@0.1.4"],
-                    "env": {
-                        "TAVILY_API_KEY": (
-                            utils.tavily_key or os.environ.get("TAVILY_API_KEY", "")
-                        ).strip()
-                    },
-                }
-            }
-        }
-    
     elif mcp_type == "web_fetch":
         return {
             "mcpServers": {
@@ -90,16 +104,6 @@ def load_config(mcp_type):
                 }
             }
         }        
-    
-    elif mcp_type == "web_fetch":
-        return {
-            "mcpServers": {
-                "web_fetch": {
-                    "command": "npx",
-                    "args": ["-y", "mcp-server-fetch-typescript"]
-                }
-            }
-        }
 
     elif mcp_type == "korea_weather":
         return {
@@ -132,20 +136,21 @@ def load_config(mcp_type):
         }
 
     elif mcp_type == "websearch":
-        gateway_url = get_agentcore_gateway_mcp_url("gateway-websearch", "us-east-1")
+        gateway_url = get_websearch_gateway_url()
         if not gateway_url:
             logger.info(
                 "AgentCore gateway websearch MCP skipped: "
                 "gateway-websearch not found in us-east-1."
             )
             return {}
+        gateway_region = config.get("agentcore_websearch_gateway_region", "us-east-1")
         return {
             "mcpServers": {
                 "gateway-websearch": {
                     "type": "streamable_http",
                     "url": gateway_url,
                     "auth_type": "aws_sigv4",
-                    "auth_region": "us-east-1",
+                    "auth_region": gateway_region,
                     "auth_service": "bedrock-agentcore",
                 }
             }
@@ -154,21 +159,6 @@ def load_config(mcp_type):
     elif mcp_type == "사용자 설정":
         return mcp_user_config
 
-def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str | None:
-    client = boto3.client("bedrock-agentcore-control", region_name=gateway_region)
-    try:
-        response = client.list_gateways()
-        for item in response.get("items", []):
-            if item.get("name") != gateway_name:
-                continue
-
-            gateway_id = item["gatewayId"]
-            gateway = client.get_gateway(gatewayIdentifier=gateway_id)
-            return gateway["gatewayUrl"].rstrip("/")
-    except Exception as e:
-        logger.error(f"Error resolving AgentCore gateway URL for {gateway_name}: {e}")
-
-    return None
 
 def load_selected_config(mcp_servers: dict):
     logger.info(f"mcp_servers: {mcp_servers}")
