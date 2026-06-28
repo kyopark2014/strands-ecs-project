@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install "streamlit>=1.41.0,<2.0.0" streamlit-chat streamlit-paste-button pandas numpy boto3 bedrock-agentcore
+RUN pip install "streamlit>=1.41.0,<2.0.0" streamlit-chat streamlit-paste-button pandas numpy "boto3>=1.43.32" "botocore>=1.43.32" bedrock-agentcore
 RUN pip install langchain_aws langchain langchain_community langchain_experimental langchain-text-splitters
 RUN pip install mcp 
 RUN pip install aioboto3 opensearch-py

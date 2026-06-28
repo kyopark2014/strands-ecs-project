@@ -699,11 +699,22 @@ def get_runtime_session_id() -> str:
 @contextlib.asynccontextmanager
 async def _streamable_http_with_auth(
     url: str,
-    auth,
+    auth_region: str,
+    auth_service: str = "bedrock-agentcore",
     *,
     terminate_on_close: bool = True,
 ):
-    """Streamable HTTP MCP with SigV4 auth (e.g. gateway-websearch)."""
+    """Streamable HTTP MCP with SigV4 auth (e.g. gateway-websearch).
+
+    Auth and httpx client are created inside the MCP background thread so
+    ECS task role credentials resolve in the same thread that sends requests.
+    """
+    import agentcore_sigv4_auth
+
+    auth = agentcore_sigv4_auth.AgentCoreSigV4Auth(
+        region=auth_region,
+        service=auth_service,
+    )
     client = create_mcp_http_client(auth=auth)
     async with client:
         async with streamable_http_client(
@@ -782,14 +793,10 @@ class MCPClientManager:
                         hdrs = config.get("headers") or {}
                         auth_region = config.get("auth_region")
                         if auth_region:
-                            import agentcore_sigv4_auth
-                            auth = agentcore_sigv4_auth.AgentCoreSigV4Auth(
-                                region=auth_region,
-                                service=config.get("auth_service", "bedrock-agentcore"),
-                            )
+                            auth_service = config.get("auth_service", "bedrock-agentcore")
                             self.clients[name] = MCPClient(
-                                lambda u=url, a=auth: _streamable_http_with_auth(
-                                    u, a, terminate_on_close=True
+                                lambda u=url, r=auth_region, s=auth_service: _streamable_http_with_auth(
+                                    u, r, s, terminate_on_close=True
                                 )
                             )
                         elif hdrs:
@@ -1119,8 +1126,21 @@ def update_tools(strands_tools: list, mcp_servers: list):
             
     return tools
 
+def _warm_aws_credentials() -> None:
+    """Ensure ECS task role credentials are loaded before MCP SigV4 signing."""
+    try:
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        if credentials is not None and hasattr(credentials, "refresh"):
+            credentials.refresh()
+        boto3.client("sts").get_caller_identity()
+    except Exception as e:
+        logger.warning("Could not warm AWS credentials before MCP init: %s", e)
+
+
 def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: list[str]):
     """Create Agent with Strands AgentSkills plugin for selected skills."""
+    _warm_aws_credentials()
     init_mcp_clients(mcp_servers)
 
     tools = update_tools(strands_tools, mcp_servers)

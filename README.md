@@ -2,77 +2,10 @@
 
 Amazon ECS에서 [Strands agent](https://strandsagents.com/0.1.x/)를 이용해 Agentic AI를 구현하는 방법을 설명합니다. Strands Agent는 AI agent 구축 및 실행을 위해 설계된 오픈소스 SDK입니다. 계획(planning), 사고 연결(chaining thoughts), 도구 호출, Reflection과 같은 agent 기능을 쉽게 활용할 수 있습니다.
 
-Agent의 기본 동작 확인 및 구현을 위해 **ECS Fargate**에 Docker 컨테이너 형태로 탑재되어 ALB와 CloudFront를 이용해 Streamlit으로 테스트할 수 있습니다. `installer.py`가 AgentCore Memory IAM Role·Memory 인스턴스·Knowledge Base·ECS 인프라를 자동 배포합니다. User ID별로 대화·메모리를 분리하며, MCP(`short term memory`, `long term memory`)로 에이전트가 필요 시 메모리를 조회합니다.
+Agent의 기본 동작 확인 및 구현을 위해 **ECS Fargate**에 Docker 컨테이너 형태로 탑재되어 ALB와 CloudFront를 이용해 Streamlit으로 테스트할 수 있습니다. `installer.py`가 AgentCore Memory·**AgentCore Web Search Gateway**·Bedrock Knowledge Base (S3 Vectors)·**S3 Files** 세션 스토리지·ECS 인프라를 자동 배포합니다. User ID별로 대화·메모리를 분리하며, MCP(`short term memory`, `long term memory`, `websearch` 등)와 **Agent Skills**로 에이전트 기능을 확장합니다.
 
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/2c1439a4-b9ad-4f1b-874e-53856a913fa4" />
 
-
-## Memory
-
-Chatbot은 연속적인 사용자의 대화를 이용하여 사용자의 경험을 향상시킬 수 있습니다. 일반 대화형 chatbot에서는 이전 대화를 [sliding window](https://langchain-ai.github.io/langgraph/concepts/memory/) 형태로 context에 포함하므로 사용할 수 있는 대화의 숫자가 제한됩니다. 여기에서는 short/long term memory를 지원하는 MCP와 AgentCore Memory를 이용하여 필요할 때마다 메모리를 조회·저장합니다.
-
-[AgentCore Memory](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-getting-started.html)를 이용하면 별도의 DB 없이 short/long term memory를 손쉽게 활용할 수 있습니다. 대화 transaction은 short-term memory에 저장되고, strategy가 추출한 구조화된 기억은 long-term memory에 namespace로 저장됩니다.
-
-### Short Term Memory
-
-대화 transaction은 [agentcore_memory.py](./application/agentcore_memory.py)의 `save_conversation_to_memory()`로 저장합니다.
-
-```python
-memory_result = memory_client.create_event(
-    memory_id=memory_id,
-    actor_id=actor_id,
-    session_id=session_id,
-    event_timestamp=event_timestamp,
-    messages=conversation
-)
-```
-
-[mcp_server_short_term_memory.py](./application/mcp_server_short_term_memory.py)의 `list_events`로 최근 대화를 조회합니다.
-
-### Long Term Memory
-
-[mcp_server_long_term_memory.py](./application/mcp_server_long_term_memory.py)의 `long_term_memory` 도구로 record/retrieve/list/get/delete를 수행합니다. 사용자별 변수는 `user_{user_id}.json`에 저장됩니다.
-
-## 사전 설치 (Prerequisites)
-
-```bash
-pip install bedrock-agentcore
-python installer.py --project-name strands-ecs --region us-west-2
-```
-
-`installer.py`가 수행하는 Memory 관련 작업:
-
-1. AgentCore Memory용 IAM Role 생성
-2. AgentCore Memory 인스턴스 생성 (`memory_id`를 `application/config.json`에 저장)
-3. ECS Fargate·Knowledge Base·AgentCore Web Search Gateway·**S3 Files 세션 스토리지** 등 인프라 배포
-
-## Memory 초기화 흐름
-
-앱 실행 시 [app.py](./application/app.py)에서 User ID를 입력하고, Agent 모드에서 **Memory** 체크박스가 켜져 있으면 응답 후 `chat.save_to_memory()`가 호출됩니다.
-
-```
-User ID 입력 → chat.set_user_id() → mcp.env 저장
-Agent 응답 + Memory Enable → save_to_memory() → agentcore_memory.save_conversation_to_memory()
-```
-
-## 주요 변수
-
-| 파일 | 변수 | 설명 |
-|------|------|------|
-| `config.json` | `agentcore_memory_role`, `memory_id` | 프로젝트 Memory 설정 |
-| `user_{user_id}.json` | `memory_id`, `actor_id`, `session_id`, `namespace` | 사용자별 Memory |
-| `config.json` | `s3_files_*`, `s3_files_mount_path` | S3 Files 세션 스토리지 |
-| `mcp.env` | `user_id` | MCP memory 서버용 사용자 ID |
-
-## MCP를 이용한 메모리 활용
-
-[mcp_config.py](./application/mcp_config.py)에서 `short term memory`, `long term memory`를 선택하면 stdio MCP 서버가 연결됩니다.
-
-| 구분 | 단기 메모리 | 장기 메모리 |
-|------|-----------|-----------|
-| 데이터 | 원본 대화 이벤트 | strategy가 추출한 구조화된 기억 |
-| MCP 도구 | `list_events` | `long_term_memory` (record/retrieve/list/get/delete) |
-| 파일 | `mcp_server_short_term_memory.py` | `mcp_server_long_term_memory.py` |
 
 ## Session Management & S3 Files
 
@@ -227,6 +160,13 @@ flowchart TB
 | `s3_files_mount_path` | `/mnt/workspace` |
 | `ecs_session_vpc_subnets` | ECS 태스크 subnet 목록 |
 | `ecs_session_security_groups` | ECS task security group |
+| `agentcore_websearch_gateway_name` | Web Search Gateway 이름 (`gateway-websearch`) |
+| `agentcore_websearch_gateway_region` | Gateway 리전 (`us-east-1`) |
+| `agentcore_websearch_gateway_id` | Gateway ID |
+| `agentcore_websearch_gateway_url` | MCP Streamable HTTP URL (`.../mcp`) |
+| `agentcore_websearch_gateway_role` | Gateway 서비스 IAM role ARN |
+| `default_skills` | Streamlit 기본 Skill 선택 |
+| `default_strands_tool_selections` | Streamlit 기본 Strands Tool 선택 |
 
 ECS 태스크 정의 예 ([installer.py](./installer.py)):
 
@@ -279,14 +219,6 @@ Strands agent는 아래와 같은 [Agent Loop](https://strandsagents.com/0.1.x/u
 
 ![image](https://github.com/user-attachments/assets/6f641574-9d0b-4542-b87f-98d7c2715e09)
 
-Tool들을 아래와 같이 병렬로 처리할 수 있습니다.
-
-```python
-agent = Agent(
-    max_parallel_tools=4  
-)
-```
-
 ## Strands Agent 활용 방법
 
 ### Operation Architecture
@@ -310,9 +242,9 @@ flowchart TB
     BR[Bedrock Runtime]
   end
 
-  subgraph Skills["Agent Skills (skill.py)"]
+  subgraph Skills["Agent Skills (application/skills/)"]
     SRC["skills/*/SKILL.md"]
-    BSP[build_skill_prompt]
+    ASK[AgentSkills plugin]
     GSI[get_skill_instructions]
   end
 
@@ -329,10 +261,10 @@ flowchart TB
   subgraph MCPServers["MCP Servers (mcp_config.py)"]
     STMCP[short-term memory]
     LTMCP[long-term memory]
-    T[tavily]
-    R[retrieve]
+    R[retrieve / RAG]
     AWS[aws documentation]
-    WF[web_fetch / korea_weather / trade_info / websearch]
+    WF[web_fetch / korea_weather / trade_info]
+    WS_MCP[websearch\nAgentCore Gateway + SigV4]
   end
 
   subgraph Storage["Artifacts / S3 / ECS / S3 Files"]
@@ -346,7 +278,7 @@ flowchart TB
   UID --> RSA
   MEMCHK -->|save_to_memory| STM
   M --> RSA
-  SKUI -->|skill_list| BSP
+  SKUI -->|skill_list| ASK
   SKUI -->|mcp_servers| MCP
 
   RSA --> A
@@ -357,13 +289,15 @@ flowchart TB
   A --> ST
   A --> MCP
   A --> GSI
-  BSP -->|system_prompt| A
+  ASK -->|plugin tools| A
   GSI --> SRC
   MCP --> MCPServers
   MCP --> STMCP
   MCP --> LTMCP
+  MCP --> WS_MCP
   STMCP --> STM
   LTMCP --> LTM
+  WS_MCP -->|SigV4 InvokeGateway| ECS
   STM --> UJSON
   LTM --> UJSON
   BT --> ART
@@ -377,8 +311,18 @@ flowchart TB
 |------|------|------|
 | 일상적인 대화 | `chat.general_conversation` | 대화 이력 + Bedrock Runtime `invoke_model_with_response_stream` 스트리밍 |
 | RAG | `chat.run_rag_with_knowledge_base` | Bedrock Knowledge Base 검색(`retrieve`) 후 Bedrock Runtime으로 답변 생성 |
-| **Agent** | `strands_agent.run_strands_agent` | Strands SDK + strands_tools + MCP + Skills |
+| **Agent** | `strands_agent.run_strands_agent` | Strands SDK + built-in tools + strands_tools + MCP + Agent Skills |
 | 이미지 분석 | `chat.summarize_image` | ChatBedrock 멀티모달 (이미지 + 텍스트) 분석 |
+
+### Agent 모드 UI 구성 ([app.py](./application/app.py))
+
+| 구분 | 선택 가능 항목 | 기본값 (`config.json`) |
+|------|----------------|------------------------|
+| **Skill** | `application/skills/*/SKILL.md` | `skill-creator`, `docx` |
+| **Strands Tool** | `current_time`, `file_read`, `file_write`, `http_request` | `current_time`, `file_read`, `file_write` |
+| **MCP** | `RAG`, `aws documentation`, `trade_info`, `web_fetch`, `websearch`, `korea_weather`, `short term memory`, `long term memory`, `사용자 설정` | `korea_weather`, `web_fetch`, `websearch`, `long term memory` |
+
+> Tavily MCP는 UI 기본 목록에서 제거되었습니다. 웹 검색은 **AgentCore Web Search Gateway** MCP(`websearch`)를 사용합니다.
 
 
 ### Streamlit에서 agent의 실행
@@ -405,55 +349,60 @@ if prompt := st.chat_input("메시지를 입력하세요."):
 
 ### Agent의 실행
 
-아래와 같이 system prompt, model, tool 정보를 가지고 agent를 생성합니다.
+[strands_agent.py](./application/strands_agent.py)에서 Agent는 아래 순서로 구성됩니다.
+
+1. **`_warm_aws_credentials()`** — ECS task role credential 선로드 (Web Search Gateway SigV4용)
+2. **`init_mcp_clients()`** — 선택된 MCP 서버 설정 등록
+3. **`update_tools()`** — built-in tools + strands_tools + MCP tools 수집
+4. **`AgentSkills` plugin** — Skill 모드가 Enable이면 `application/skills/` 로드
+5. **`FileSessionManager`** — S3 Files(`/mnt/workspace`)에 세션 영속화
 
 ```python
-def create_agent(system_prompt, tools):
-    if system_prompt==None:
-        system_prompt = (
-            "당신의 이름은 서연이고, 질문에 대해 친절하게 답변하는 사려깊은 인공지능 도우미입니다."
-            "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다." 
-            "모르는 질문을 받으면 솔직히 모른다고 말합니다."
-        )
-    model = get_model()    
-    agent = Agent(
-        model=model,
-        system_prompt=system_prompt,
-        tools=tools,
-        conversation_manager=conversation_manager
+def create_agent(strands_tools, mcp_servers, skill_list):
+    _warm_aws_credentials()
+    init_mcp_clients(mcp_servers)
+    tools = update_tools(strands_tools, mcp_servers)
+
+    skills_plugin = None
+    if chat.skill_mode == "Enable" and skill_list:
+        skills_plugin = AgentSkills(skills=skill_dirs_from_list(skill_list))
+
+    session_manager = FileSessionManager(
+        session_id=get_runtime_session_id(),
+        storage_dir=get_session_storage_dir(),
     )
-    return agent
+
+    return Agent(
+        model=get_model(),
+        system_prompt=BASE_SYSTEM_PROMPT,
+        tools=tools,
+        plugins=[skills_plugin] if skills_plugin else [],
+        conversation_manager=conversation_manager,
+        session_manager=session_manager,
+    )
 ```
 
-[chat.py](./application/chat.py)와 같이 Agent를 실행하고 stream으로 결과를 받아서 보여줍니다. 이때, 아래와 같이 event에서 "data"만을 추출한 후에 full_response로 저장한 후에 markdown으로 표시합니다. 
+**Built-in tools** (`get_builtin_tools()`): `execute_code`, `bash`, `upload_file_to_s3` — AgentSkills와 함께 사용합니다.
+
+**Strands tools** (UI에서 선택): `current_time`, `file_read`, `file_write`, `http_request`
+
+`run_strands_agent()`는 tool/MCP/skill/session 설정이 바뀌면 Agent를 재생성하고, `start_agent_clients()`로 MCP 세션을 유지합니다.
 
 ```python
-async def run_strands_agent(query, strands_tools, mcp_servers, containers):
-    await strands_agent.initiate_agent(
-        system_prompt=None, 
-        strands_tools=strands_tools, 
-        mcp_servers=mcp_servers
-    )
+async def run_strands_agent(query, strands_tools, mcp_servers, skill_list, notification_queue):
+    # 설정 변경 시 Agent 재생성 + persistent MCP clients 시작
+    agent = create_agent(strands_tools, mcp_servers, skill_list)
+    mcp_manager.start_agent_clients(mcp_servers)
 
-    final_result = current = ""
-    with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
-        agent_stream = strands_agent.agent.stream_async(query)
-        
-        async for event in agent_stream:
-            text = ""            
+    with mcp_manager.get_active_clients(mcp_servers):
+        async for event in agent.stream_async(query):
             if "data" in event:
-                text = event["data"]
-                logger.info(f"[data] {text}")
-                current += text
-
+                ...
+            elif "current_tool_use" in event:
+                ...
             elif "result" in event:
-                final = event["result"]                
-                message = final.message
-                if message:
-                    content = message.get("content", [])
-                    result = content[0].get("text", "")
-                    final_result = result
-    return final_result
+                ...
+    return final_result, image_urls
 ```
 
 ### 대화 이력의 활용
@@ -489,155 +438,83 @@ agent = Agent(
 
 ### MCP 활용
 
-아래와 같이 MCPClient로 stdio_mcp_client을 지정한 후에 list_tools_sync을 이용해 tool 정보를 추출합니다. MCP tool은 strands tool과 함께 아래처럼 사용할 수 있습니다.
+[mcp_config.py](./application/mcp_config.py)가 MCP 유형별 설정을 반환하고, [strands_agent.py](./application/strands_agent.py)의 `MCPClientManager`가 Strands `MCPClient`로 연결합니다.
+
+| MCP 이름 | transport | 설명 |
+|----------|-----------|------|
+| `RAG` | stdio | Bedrock Knowledge Base retrieve (`mcp_server_retrieve.py`) |
+| `aws documentation` | stdio | `uvx awslabs.aws-documentation-mcp-server@latest` |
+| `web_fetch` | stdio | `npx mcp-server-fetch-typescript` |
+| `korea_weather` | stdio | 기상청 API (`mcp_server_korea_weather.py`) |
+| `trade_info` | stdio | 무역 정보 (`mcp_server_trade_info.py`) |
+| `short term memory` | stdio | AgentCore Memory short-term (`mcp_server_short_term_memory.py`) |
+| `long term memory` | stdio | AgentCore Memory long-term (`mcp_server_long_term_memory.py`) |
+| **`websearch`** | **streamable_http** | AgentCore Web Search Gateway (`gateway-websearch`, `us-east-1`) |
+| `사용자 설정` | — | `mcp_user_config`에 사용자 정의 MCP JSON |
+
+#### AgentCore Web Search (`websearch`)
+
+`installer.py`가 `us-east-1`에 `gateway-websearch` Gateway를 생성(또는 기존 Gateway 재사용)하고, URL·ID를 `application/config.json`에 기록합니다. ECS task role이 Gateway MCP URL에 **SigV4**(`bedrock-agentcore`)로 인증합니다.
 
 ```python
-from strands.tools.mcp import MCPClient
-from strands_tools import calculator, current_time, use_aws
-
-stdio_mcp_client = MCPClient(lambda: stdio_client(
-    StdioServerParameters(command="uvx", args=["awslabs.aws-documentation-mcp-server@latest"])
-))
-
-with stdio_mcp_client as client:
-    aws_documentation_tools = client.list_tools_sync()
-    logger.info(f"aws_documentation_tools: {aws_documentation_tools}")
-
-    tools=[    
-        calculator, 
-        current_time,
-        use_aws
-    ]
-
-    tools.extend(aws_documentation_tools)
-
-    agent = Agent(
-        model=model,
-        system_prompt=system,
-        tools=tools,
-        conversation_manager=conversation_manager
-    )
+# mcp_config.py
+"gateway-websearch": {
+    "type": "streamable_http",
+    "url": gateway_url,  # config.json agentcore_websearch_gateway_url
+    "auth_type": "aws_sigv4",
+    "auth_region": "us-east-1",
+    "auth_service": "bedrock-agentcore",
+}
 ```
 
-또한, wikipedia 검색을 위한 MCP server의 예는 아래와 같습니다. 상세한 코드는 [mcp_server_wikipedia.py](./application/mcp_server_wikipedia.py)을 참조합니다.
+[agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)는 LangGraph ECS 프로젝트와 동일한 httpx `Auth` 구현을 사용합니다. SigV4 auth와 httpx client는 MCP **백그라운드 스레드** 안에서 생성되어 ECS task role credential이 요청 스레드와 일치합니다.
 
-```python
-from mcp.server.fastmcp import FastMCP
-import wikipedia
-import logging
-import sys
+#### MCPClientManager
 
-logging.basicConfig(
-    level=logging.INFO,  # Default to INFO level
-    format='%(filename)s:%(lineno)d | %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stderr)
-    ]
-)
-logger = logging.getLogger("rag")
-
-mcp = FastMCP(
-    "Wikipedia",
-    dependencies=["wikipedia"],
-)
-
-@mcp.tool()
-def search(query: str):
-    logger.info(f"Searching Wikipedia for: {query}")
-    
-    return wikipedia.search(query)
-
-@mcp.tool()
-def summary(query: str):
-    return wikipedia.summary(query)
-
-@mcp.tool()
-def page(query: str):
-    return wikipedia.page(query)
-
-@mcp.tool()
-def random():
-    return wikipedia.random()
-
-@mcp.tool()
-def set_lang(lang: str):
-    wikipedia.set_lang(lang)
-    return f"Language set to {lang}"
-
-if __name__ == "__main__":
-    mcp.run()
-```
-
-### 동적으로 MCP Server를 binding하기
-
-MCP Server를 동적으로 관리하기 위하여 MCPClientManager를 정의합니다. add_client는 MCP 서버의 name, command, args, env로 MCP Client를 정의합니다. 
+stdio MCP와 streamable HTTP MCP(websearch)를 lazy initialization합니다. Agent 실행 중에는 `start_agent_clients()`로 persistent session을 유지합니다.
 
 ```python
 class MCPClientManager:
-    def __init__(self):
-        self.clients: Dict[str, MCPClient] = {}
-        
-    def add_client(self, name: str, command: str, args: List[str], env: dict[str, str] = {}) -> None:
-        """Add a new MCP client"""
-        self.clients[name] = MCPClient(lambda: stdio_client(
-            StdioServerParameters(
-                command=command, args=args, env=env
-            )
-        ))
-    
-    def remove_client(self, name: str) -> None:
-        """Remove an MCP client"""
-        if name in self.clients:
-            del self.clients[name]
-    
-    @contextmanager
-    def get_active_clients(self, active_clients: List[str]):
-        """Manage active clients context"""
-        active_contexts = []
-        for client_name in active_clients:
-            if client_name in self.clients:
-                active_contexts.append(self.clients[client_name])
-
-        if active_contexts:
-            with contextlib.ExitStack() as stack:
-                for client in active_contexts:
-                    stack.enter_context(client)
-                yield
-        else:
-            yield
-
-# Initialize MCP client manager
-mcp_manager = MCPClientManager()
+    def add_stdio_client(self, name, command, args, env={}): ...
+    def add_streamable_client(self, name, url, headers={}, auth_region=None, auth_service=None): ...
+    def get_client(self, name) -> MCPClient: ...  # lazy create
+    def start_agent_clients(self, client_names) -> bool: ...  # persistent MCP sessions
+    def get_active_clients(self, active_clients): ...  # context manager
 ```
 
-Streamlit으로 구현한 [app.py](./application/app.py)에서 tool들을 선택하면 mcp_tools를 얻을 수 있습니다. 이후 아래와 같이 agent 생성시에 active client으로 부터 tool list를 가져와서 tools로 활용합니다.
+streamable HTTP + SigV4 예시 (websearch):
 
 ```python
-tools = []
+# auth/httpx는 transport factory 내부(백그라운드 스레드)에서 생성
+MCPClient(
+    lambda u=url, r=auth_region, s=auth_service: _streamable_http_with_auth(u, r, s)
+)
+```
+
+tool 목록은 `update_tools()`에서 MCP별로 `list_tools_sync()`로 수집합니다.
+
+```python
 for mcp_tool in mcp_servers:
-    with mcp_manager.get_active_clients([mcp_tool]) as _:
+    with mcp_manager.get_active_clients([mcp_tool]):
         client = mcp_manager.get_client(mcp_tool)
-        mcp_servers_list = client.list_tools_sync()
-        tools.extend(mcp_servers_list)
-
-agent = create_agent(system_prompt, tools)
-tool_list = get_tool_list(tools)
+        tools.extend(client.list_tools_sync())
 ```
 
-생성된 agent는 아래와 같이 mcp_manager를 이용해 실행합니다.
+Agent 실행 시 persistent MCP clients를 재사용합니다.
 
 ```python
-with mcp_manager.get_active_clients(mcp_tools) as _:
-    agent_stream = agent.stream_async(question)
-    
-    tool_name = ""
-    async for event in agent_stream:
-        if "message" in event:
-            message = event["message"]
-            for content in message["content"]:                
-                if "text" in content:
-                    final_response = content["text"]
+with mcp_manager.get_active_clients(mcp_servers):
+    async for event in agent.stream_async(query):
+        ...
 ```
+
+#### Agent Skills
+
+Skill은 `application/skills/<name>/SKILL.md` 형식입니다. Streamlit Agent 모드에서 Skill을 선택하면 `AgentSkills` plugin이 `get_skill_instructions` 등 skill tool을 Agent에 등록합니다. 기본 Skill은 `config.json`의 `default_skills`로 설정합니다.
+
+#### 커스텀 MCP 서버 예 (Wikipedia)
+
+stdio 기반 커스텀 MCP 서버 패턴은 [mcp_server_wikipedia.py](./application/mcp_server_wikipedia.py)를 참조합니다. UI의 **사용자 설정** MCP에 JSON으로 등록해 사용할 수 있습니다.
 
 
 ### Streamlit에 맞게 출력문 조정하기
@@ -703,11 +580,24 @@ if "event_loop_metrics" in event and \
 |------|------|
 | Docker CLI | `Dockerfile` 기반 이미지 빌드 (`linux/amd64`) |
 | AWS CLI | ECR 로그인 및 자격 증명 |
-| boto3 | `pip install boto3` |
+| boto3 / botocore | `>=1.43.32` (Dockerfile·Gateway SigV4 호환) |
+| bedrock-agentcore | AgentCore Memory (`MemoryClient`) |
 
-배포 시 생성되는 주요 리소스: ECR (`ecr-for-{project_name}`), ECS Cluster/Service (S3 Files volume `/mnt/workspace`), ALB, CloudFront, VPC, Bedrock Knowledge Base (S3 Vectors), **S3 Files** (`agentcore-sessions/` prefix)
+배포 시 생성되는 주요 리소스: ECR (`ecr-for-{project_name}`), ECS Cluster/Service (S3 Files volume `/mnt/workspace`), ALB, CloudFront, VPC, Bedrock Knowledge Base (S3 Vectors), **AgentCore Memory**, **AgentCore Web Search Gateway** (`us-east-1`), **S3 Files** (`agentcore-sessions/` prefix)
 
-상세한 배포 흐름은 [installer.md](./installer.md)를 참조하세요.
+상세한 배포 흐름은 [installer.md](./installer.md)를 참조하세요. `installer.py` 주요 단계:
+
+| 단계 | 내용 |
+|------|------|
+| `[1/10]` | S3 bucket |
+| `[2/10]` | IAM roles, AgentCore Memory, **Web Search Gateway** (`us-east-1`) |
+| `[4/10]` ~ `[4.5/10]` | S3 Vectors, Knowledge Base |
+| `[5/10]` | VPC, NAT, subnets |
+| `[5.5/10]` | **S3 Files** session storage (`/mnt/workspace`) |
+| `[6/10]` ~ `[7/10]` | ALB, CloudFront |
+| `[8/10]` | ECR build & push |
+| `[9/10]` | ECS Fargate deploy |
+| `[10/10]` | Application readiness check |
 
 ### CloudShell 또는 로컬에서 배포
 
@@ -756,12 +646,12 @@ cd strands-ecs-project && python3 installer.py
 
 `installer.py`는 ECR에 새 이미지를 push하고, ECS 서비스를 새 태스크 정의로 업데이트합니다(`forceNewDeployment`).
 
-이미지 재빌드 없이 ECS만 재시작하려면 AWS CLI를 사용합니다. (`project_name`을 `installer.py` 설정값에 맞게 변경)
+이미지 재빌드 없이 ECS만 재시작하려면 AWS CLI를 사용합니다. (`project_name` 기본값: `strands-ecs`)
 
 ```text
 aws ecs update-service \
-  --cluster cluster-for-dwfb \
-  --service service-for-dwfb \
+  --cluster cluster-for-strands-ecs \
+  --service service-for-strands-ecs \
   --force-new-deployment \
   --region us-west-2
 ```
@@ -810,6 +700,8 @@ pip install -r requirements.txt
 ```text
 streamlit run application/app.py
 ```
+
+로컬 실행 시 `/mnt/workspace` S3 Files 마운트가 없어 **FileSessionManager 세션 영속화**와 **websearch MCP**(ECS task role SigV4)는 ECS 배포 환경에서 검증하는 것을 권장합니다.
 
 
 

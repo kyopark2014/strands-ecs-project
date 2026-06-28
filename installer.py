@@ -4408,6 +4408,14 @@ def deploy_ecs_service(
     task_definition_arn = task_def_response["taskDefinition"]["taskDefinitionArn"]
     logger.info(f"  ✓ Registered task definition: {task_definition_arn}")
 
+    network_configuration = {
+        "awsvpcConfiguration": {
+            "subnets": private_subnets,
+            "securityGroups": [vpc_info["ecs_sg_id"]],
+            "assignPublicIp": "DISABLED",
+        }
+    }
+
     cluster_name = cluster_arn.split("/")[-1]
     service_arn = None
     try:
@@ -4420,9 +4428,22 @@ def deploy_ecs_service(
                 service=service_name,
                 taskDefinition=task_definition_arn,
                 desiredCount=1,
+                networkConfiguration=network_configuration,
+                loadBalancers=[
+                    {
+                        "targetGroupArn": tg_arn,
+                        "containerName": container_name,
+                        "containerPort": 8501,
+                    }
+                ],
                 forceNewDeployment=True,
             )
-            logger.info("  ✓ Updated ECS service with new task definition")
+            logger.info(
+                "  ✓ Updated ECS service with task definition, network, and load balancer"
+            )
+            logger.info(
+                f"    subnets={private_subnets}, security_group={vpc_info['ecs_sg_id']}"
+            )
     except ClientError:
         pass
 
@@ -4433,13 +4454,7 @@ def deploy_ecs_service(
             taskDefinition=task_definition_arn,
             desiredCount=1,
             launchType="FARGATE",
-            networkConfiguration={
-                "awsvpcConfiguration": {
-                    "subnets": private_subnets,
-                    "securityGroups": [vpc_info["ecs_sg_id"]],
-                    "assignPublicIp": "DISABLED",
-                }
-            },
+            networkConfiguration=network_configuration,
             loadBalancers=[
                 {
                     "targetGroupArn": tg_arn,
