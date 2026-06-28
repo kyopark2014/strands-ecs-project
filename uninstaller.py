@@ -1142,6 +1142,11 @@ def main():
 
     parser = argparse.ArgumentParser(description="AWS Infrastructure Uninstaller")
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt and proceed with deletion",
+    )
+    parser.add_argument(
         "--delete-agentcore-gateway",
         action="store_true",
         help=(
@@ -1150,7 +1155,16 @@ def main():
         ),
     )
     args = parser.parse_args()
-    
+
+    if not args.yes:
+        print("\n" + "=" * 60)
+        print("WARNING: This will delete all resources created by installer.py")
+        print("=" * 60)
+        response = input("\nAre you sure you want to continue? (yes/no): ")
+        if response.lower() != "yes":
+            print("Uninstallation cancelled.")
+            sys.exit(0)
+
     start_time = time.time()
     cleanup_errors = []
     
