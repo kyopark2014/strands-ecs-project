@@ -11,7 +11,6 @@ import sys
 import strands_agent
 import uuid
 import utils
-import skill
 from notification_queue import NotificationQueue
 
 logging.basicConfig(
@@ -117,7 +116,7 @@ with st.sidebar:
         default_skill_selections = config.get("default_skills") or ["skill-creator"]
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
-            available_skill_info = skill.available_skill_info("base")
+            available_skill_info = strands_agent.available_skills()
             for s in available_skill_info:
                 default_value = s["name"] in default_skill_selections
                 skill_selections[s["name"]] = st.checkbox(s["name"], key=f"skill_{s['name']}", value=default_value, help=s["description"], disabled=False)

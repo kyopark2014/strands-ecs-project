@@ -7,8 +7,6 @@ import logging
 import sys
 import utils
 import boto3
-import yaml
-import skill
 import subprocess
 
 from contextlib import contextmanager
@@ -23,8 +21,7 @@ from mcp import stdio_client, StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 from botocore.config import Config
-from dataclasses import dataclass
-from strands import Agent, tool
+from strands import Agent, tool, AgentSkills, Skill
 from urllib import parse
 
 logging.basicConfig(
@@ -51,118 +48,10 @@ s3_bucket = config.get("s3_bucket")
 sharing_url = config.get("sharing_url")
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(WORKING_DIR)
 SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
 ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
-
-
-@dataclass
-class Skill:
-    name: str
-    description: str
-    instructions: str
-    path: str
-
-class SkillManager:
-    """Discovers, loads and selects Agent Skills following the Anthropic spec."""
-
-    def __init__(self, skills_dir: str = SKILLS_DIR):
-        self.skills_dir = skills_dir
-        self.registry: dict[str, Skill] = {}
-        self._discover()
-
-    # ---- discovery & metadata loading ----
-
-    def _discover(self):
-        """Scan skills directory and load metadata (frontmatter only)."""
-        if not os.path.isdir(self.skills_dir):
-            os.makedirs(self.skills_dir, exist_ok=True)
-            logger.info(f"Created skills directory: {self.skills_dir}")
-            return
-
-        for entry in os.listdir(self.skills_dir):
-            skill_md = os.path.join(self.skills_dir, entry, "SKILL.md")
-            if os.path.isfile(skill_md):
-                try:
-                    meta, instructions = self._parse_skill_md(skill_md)
-                    skill = Skill(
-                        name=meta.get("name", entry),
-                        description=meta.get("description", ""),
-                        instructions=instructions,
-                        path=os.path.join(self.skills_dir, entry),
-                    )
-                    self.registry[skill.name] = skill
-                    logger.info(f"Skill discovered: {skill.name}")
-                except Exception as e:
-                    logger.warning(f"Failed to load skill '{entry}': {e}")
-
-    @staticmethod
-    def _parse_skill_md(filepath: str) -> tuple[dict, str]:
-        """Parse YAML frontmatter + markdown body from a SKILL.md file."""
-        with open(filepath, "r", encoding="utf-8") as f:
-            raw = f.read()
-
-        if not raw.startswith("---"):
-            return {}, raw
-
-        parts = raw.split("---", 2)
-        if len(parts) < 3:
-            return {}, raw
-
-        frontmatter = yaml.safe_load(parts[1]) or {}
-        body = parts[2].strip()
-        return frontmatter, body
-
-    # ---- prompt generation (progressive disclosure) ----
-    def available_skills_xml(self) -> str:
-        """Generate <available_skills> XML for the system prompt (metadata only)."""
-        if not self.registry:
-            return ""
-        lines = ["<available_skills>"]
-        for s in self.registry.values():
-            lines.append("  <skill>")
-            lines.append(f"    <name>{s.name}</name>")
-            lines.append(f"    <description>{s.description}</description>")
-            lines.append("  </skill>")
-        lines.append("</available_skills>")
-        return "\n".join(lines)
-
-    def get_skill_instructions(self, name: str) -> Optional[str]:
-        """Return full instructions for a skill (loaded on demand)."""
-        skill = self.registry.get(name)
-        return skill.instructions if skill else None
-
-    def select_skills(self, query: str) -> list[Skill]:
-        """Keyword-based matching to select relevant skills for a query."""
-        query_lower = query.lower()
-        selected = []
-        for skill in self.registry.values():
-            keywords = skill.description.lower().split()
-            if any(kw in query_lower for kw in keywords if len(kw) > 3):
-                selected.append(skill)
-        return selected
-
-    def build_active_skill_prompt(self, skills: list[Skill]) -> str:
-        """Build the full instructions block for activated skills."""
-        if not skills:
-            return ""
-        parts = ["<active_skills>"]
-        for s in skills:
-            parts.append(f'<skill name="{s.name}">')
-            parts.append(s.instructions)
-            parts.append("</skill>")
-        parts.append("</active_skills>")
-        return "\n".join(parts)
-
-# global singleton
-skill_manager = SkillManager()
-
-SKILL_USAGE_GUIDE = (
-    "\n## Skill 사용 가이드\n"
-    "위의 <available_skills>에 나열된 skill이 사용자의 요청과 관련될 때:\n"
-    "1. 먼저 get_skill_instructions 도구로 해당 skill의 상세 지침을 로드하세요.\n"
-    "2. 지침에 포함된 코드 패턴을 execute_code 도구로 실행하세요.\n"
-    "3. skill 지침이 없는 일반 질문은 직접 답변하세요.\n"
-)
+ARTIFACTS_REL = "application/artifacts"
 
 BASE_SYSTEM_PROMPT = (
     "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다.\n"
@@ -171,22 +60,66 @@ BASE_SYSTEM_PROMPT = (
     "한국어로 답변하세요.\n\n"
     "## Agent Workflow\n"
     "1. 사용자 입력을 받는다\n"
-    "2. 요청에 맞는 skill이 있으면 get_skill_instructions 도구로 상세 지침을 로드한다\n"
-    "3. skill 지침에 따라 execute_code, write_file 등의 도구를 사용하여 작업을 수행한다\n"
-    "4. 결과 파일이 있으면 upload_file_to_s3로 업로드하여 URL을 제공한다\n"
-    "5. 최종 결과를 사용자에게 전달한다\n"
+    "2. 요청에 맞는 skill이 있으면 skills 도구로 해당 skill의 상세 지침을 로드한다\n"
+    "3. skill 지침에 따라 file_read, file_write, execute_code, bash 등의 도구를 사용하여 작업을 수행한다\n"
+    "4. execute_code와 bash의 작업 디렉터리는 application/artifacts/이다. 결과 파일은 이 디렉터리에 파일명만으로 저장한다 (예: report.docx, chart.png)\n"
+    "5. 있으면 upload_file_to_s3로 업로드하여 URL을 제공한다\n"
+    "6. 최종 결과를 사용자에게 전달한다\n"
 )
 
-def build_system_prompt(plugin_name: Optional[str] = None, command: Optional[str] = None) -> str:
-    """Assemble the full system prompt with available skills metadata."""
-    if command:
-        base = skill.build_command_prompt(plugin_name, command)
-    elif plugin_name:
-        base = skill.build_skill_prompt(plugin_name)
-    else:
-        base = BASE_SYSTEM_PROMPT
 
-    return base
+def available_skills() -> list[dict]:
+    """Return name/description for skills under SKILLS_DIR (for UI selection)."""
+    result = []
+    if not os.path.isdir(SKILLS_DIR):
+        return result
+    for entry in sorted(os.listdir(SKILLS_DIR)):
+        skill_dir = os.path.join(SKILLS_DIR, entry)
+        skill_md = os.path.join(skill_dir, "SKILL.md")
+        if os.path.isfile(skill_md):
+            try:
+                loaded = Skill.from_file(skill_dir)
+                result.append({
+                    "name": loaded.name,
+                    "description": loaded.description,
+                    "dir": entry,
+                })
+            except Exception as e:
+                logger.warning(f"Failed to load skill '{entry}': {e}")
+    return result
+
+
+def resolve_skill_dir(skill_key: str) -> Optional[str]:
+    """Map skill name (SKILL.md frontmatter) or directory name to skill path."""
+    if not skill_key or not os.path.isdir(SKILLS_DIR):
+        return None
+
+    for entry in sorted(os.listdir(SKILLS_DIR)):
+        skill_dir = os.path.join(SKILLS_DIR, entry)
+        skill_md = os.path.join(skill_dir, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        if entry == skill_key:
+            return skill_dir
+        try:
+            loaded = Skill.from_file(skill_dir)
+            if loaded.name == skill_key:
+                return skill_dir
+        except Exception as e:
+            logger.warning(f"Failed to load skill '{entry}': {e}")
+
+    logger.warning(f"Skill directory not found for key: {skill_key}")
+    return None
+
+
+def skill_dirs_from_list(skill_list: list[str]) -> list[str]:
+    """Resolve UI/config skill keys to filesystem directories for AgentSkills."""
+    dirs: list[str] = []
+    for key in skill_list:
+        path = resolve_skill_dir(key)
+        if path:
+            dirs.append(path)
+    return dirs
 
 def s3_uri_to_console_url(uri: str, region: str) -> str:
     """Open the object in the AWS S3 console (when sharing_url is not configured)."""
@@ -210,7 +143,7 @@ _ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".b
 _mpl_runtime_ready = False
 
 def _artifact_files_mtime_snapshot() -> dict:
-    """Relative path from WORKING_DIR -> mtime. Only scans under artifacts/."""
+    """Relative path from ARTIFACTS_DIR -> mtime."""
     snap = {}
     if not os.path.isdir(ARTIFACTS_DIR):
         return snap
@@ -218,7 +151,7 @@ def _artifact_files_mtime_snapshot() -> dict:
         for fn in filenames:
             full = os.path.join(dirpath, fn)
             try:
-                rel = os.path.relpath(full, WORKING_DIR)
+                rel = os.path.relpath(full, ARTIFACTS_DIR)
                 snap[rel] = os.path.getmtime(full)
             except OSError:
                 pass
@@ -235,11 +168,26 @@ def _touched_artifact_paths(before: dict, after: dict) -> list:
 
 
 def _paths_for_ui(relative_paths: list) -> list:
-    """absolute path for Streamlit st.image."""
-    out = []
-    for rel in relative_paths:
-            out.append(os.path.abspath(os.path.join(WORKING_DIR, rel)))
-    return out
+    """Absolute path for Streamlit st.image."""
+    return [os.path.abspath(os.path.join(ARTIFACTS_DIR, rel)) for rel in relative_paths]
+
+
+def resolve_workspace_path(filepath: str) -> str:
+    """Resolve workspace-relative paths for artifacts and application files."""
+    if os.path.isabs(filepath):
+        return filepath
+    normalized = filepath.replace("\\", "/")
+    if (
+        normalized in ("artifacts", "application/artifacts")
+        or normalized.startswith("artifacts/")
+        or normalized.startswith("application/artifacts/")
+    ):
+        if normalized.startswith("application/artifacts"):
+            suffix = normalized[len("application/artifacts"):].lstrip("/")
+        else:
+            suffix = normalized[len("artifacts"):].lstrip("/")
+        return os.path.join(ARTIFACTS_DIR, suffix) if suffix else ARTIFACTS_DIR
+    return os.path.join(WORKING_DIR, filepath)
 
 
 def _ensure_matplotlib_runtime():
@@ -302,7 +250,9 @@ _exec_globals = {
     "re": _re,
     "requests": _requests,
     "WORKING_DIR": WORKING_DIR,
+    "REPO_ROOT": REPO_ROOT,
     "ARTIFACTS_DIR": ARTIFACTS_DIR,
+    "ARTIFACTS_REL": ARTIFACTS_REL,
 }
 
 @tool
@@ -315,11 +265,14 @@ def execute_code(code: str) -> str:
     json, csv, os, requests, etc.
 
     Variables and imports from previous calls persist across invocations.
-    Generated files should be saved to the 'artifacts/' directory.
+    Working directory is application/artifacts/. Save generated files by filename only
+    (e.g. report.docx), not application/artifacts/report.docx.
 
     Path variables (pre-defined, do NOT redefine):
+    - REPO_ROOT: absolute path to repository root
     - WORKING_DIR: absolute path to application directory
-    - ARTIFACTS_DIR: absolute path to artifacts directory (WORKING_DIR/artifacts)
+    - ARTIFACTS_DIR: absolute path to application/artifacts
+    - ARTIFACTS_REL: workspace-relative path "application/artifacts"
 
     Args:
         code: Python code to execute.
@@ -337,7 +290,7 @@ def execute_code(code: str) -> str:
     stderr_capture = io.StringIO()
 
     try:
-        os.chdir(WORKING_DIR)
+        os.chdir(ARTIFACTS_DIR)
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = stdout_capture, stderr_capture
 
@@ -368,7 +321,7 @@ def execute_code(code: str) -> str:
         other_rels = [r for r in touched if r not in artifact_rels]
         if other_rels:
             lines = "\n".join(
-                os.path.abspath(os.path.join(WORKING_DIR, r)) for r in other_rels
+                os.path.abspath(os.path.join(ARTIFACTS_DIR, r)) for r in other_rels
             )
             result += f"\n[artifacts]\n{lines}"
 
@@ -392,7 +345,7 @@ def upload_file_to_s3(filepath: str) -> str:
     """Upload a local file to S3 and return the download URL.
 
     Args:
-        filepath: Path relative to the working directory (e.g. 'artifacts/report.pdf').
+        filepath: Path under application/ (e.g. 'artifacts/report.pdf' or 'application/artifacts/report.pdf').
 
     Returns:
         The download URL, or an error message.
@@ -406,7 +359,7 @@ def upload_file_to_s3(filepath: str) -> str:
         if not s3_bucket:
             return "S3 bucket is not configured."
 
-        full_path = os.path.join(WORKING_DIR, filepath)
+        full_path = resolve_workspace_path(filepath)
         if not os.path.exists(full_path):
             return f"File not found: {filepath}"
 
@@ -538,45 +491,6 @@ def memory_get(path: str, from_line: int = 0, lines: int = 0) -> str:
         return json.dumps({"text": f"Error reading file: {e}", "path": path}, ensure_ascii=False)
 
 
-@tool
-def get_skill_instructions(plugin_name: str, skill_name: str) -> str:
-    """Load the full instructions for a specific skill by name.
-
-    Use this when you need detailed instructions for a task that matches
-    one of the available skills listed in the system prompt.
-
-    Args:
-        plugin_name: The plugin name (e.g. 'base', 'frontend-design').
-        skill_name: The name of the skill to load (e.g. 'pdf').
-
-    Returns:
-        The full skill instructions, or an error message if not found.
-    """
-    logger.info(f"###### get_skill_instructions: {skill_name} (plugin={plugin_name}) ######")
-    skill_mgr = skill.skill_managers.get(plugin_name)
-    if skill_mgr is None:
-        if plugin_name == "base":
-            skills_dir = skill.SKILLS_DIR
-        else:
-            skills_dir = os.path.join(WORKING_DIR, "plugins", plugin_name, "skills")
-        skill_mgr = skill.SkillManager(skills_dir)
-        skill.skill_managers[plugin_name] = skill_mgr
-
-    instructions = skill_mgr.get_skill_instructions(skill_name)
-    if instructions:
-        return instructions
-
-    base_mgr = skill.skill_managers.get("base")
-    if base_mgr is None:
-        base_mgr = skill.SkillManager(skill.SKILLS_DIR)
-        skill.skill_managers["base"] = base_mgr
-    instructions = base_mgr.get_skill_instructions(skill_name)
-    if instructions:
-        return instructions
-
-    available = ", ".join(skill_mgr.registry.keys())
-    return f"Skill '{skill_name}' not found. Available skills: {available}"
-
 def _ensure_cli_scripts_on_path() -> None:
     """Prepend pip user script dir so CLIs (e.g. browser-use) resolve in subprocess."""
     import site
@@ -604,13 +518,25 @@ def _ensure_cli_scripts_on_path() -> None:
 
 @tool
 def bash(command: str) -> str:
-    """Execute a bash command and return the result"""
+    """Execute a bash command from application/artifacts/ and return the result.
+
+    Working directory is ARTIFACTS_DIR. Save outputs by filename only
+    (e.g. node create_skills_doc.js, output.docx).
+    """
     logger.info(f"###### bash: {command} ######")
     _ensure_cli_scripts_on_path()
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    env = {
+        **os.environ,
+        "REPO_ROOT": REPO_ROOT,
+        "WORKING_DIR": WORKING_DIR,
+        "ARTIFACTS_DIR": ARTIFACTS_DIR,
+        "ARTIFACTS_REL": ARTIFACTS_REL,
+    }
     result = subprocess.run(
         command, shell=True, capture_output=True, text=True,
-        cwd=WORKING_DIR, timeout=300,
-        env=os.environ,
+        cwd=ARTIFACTS_DIR, timeout=300,
+        env=env,
     )
     parts = []
     if result.stdout:
@@ -622,7 +548,7 @@ def bash(command: str) -> str:
     return "\n".join(parts) if parts else "(no output)"
 
 def get_builtin_tools() -> list:
-    """Return the list of built-in tools for the skill-aware agent."""
+    """Built-in tools paired with AgentSkills (skills tool is registered by the plugin)."""
     return [execute_code, bash, upload_file_to_s3]
 
 #########################################################
@@ -750,7 +676,7 @@ def get_model():
     return model
 
 conversation_manager = SlidingWindowConversationManager(
-    window_size=10,  
+    window_size=50,  
 )
 
 
@@ -1165,28 +1091,26 @@ def update_tools(strands_tools: list, mcp_servers: list):
     return tools
 
 def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: list[str]):
+    """Create Agent with Strands AgentSkills plugin for selected skills."""
     init_mcp_clients(mcp_servers)
 
     tools = update_tools(strands_tools, mcp_servers)
 
-    if chat.skill_mode == 'Enable':
-        tools.append(get_skill_instructions)
-
-        skill_info = skill.get_skill_info(skill_list)
-        logger.info(f"skill_info: {skill_info}")
-
-        system_prompt = skill.build_skill_prompt(skill_info)
-    else:
-        system_prompt = BASE_SYSTEM_PROMPT
-
     model = get_model()
-    
+
+    skills_plugin = None
+    if chat.skill_mode == "Enable" and skill_list:
+        skills_sources = skill_dirs_from_list(skill_list)
+        logger.info(f"skill_list: {skill_list} -> skills_sources: {skills_sources}")
+        if skills_sources:
+            skills_plugin = AgentSkills(skills=skills_sources)
+
     agent = Agent(
         model=model,
-        system_prompt=system_prompt,
+        system_prompt=BASE_SYSTEM_PROMPT,
         tools=tools,
+        plugins=[skills_plugin] if skills_plugin else [],
         conversation_manager=conversation_manager,
-        #max_parallel_tools=2
     )
 
     return agent
@@ -1206,6 +1130,7 @@ def get_tool_list(tools):
 selected_strands_tools = []
 selected_mcp_servers = []
 selected_skill_list = []
+selected_skill_mode = None
 
 async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: list[str], skill_list: list[str], notification_queue):
     """Run the strands agent with streaming and tool notifications."""
@@ -1215,12 +1140,19 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
     image_url = []
     references = []
 
-    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, active_plugin
+    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode
 
-    if selected_strands_tools != strands_tools or selected_mcp_servers != mcp_servers or selected_skill_list != skill_list:        
+    current_skill_mode = chat.skill_mode
+    if (
+        selected_strands_tools != strands_tools
+        or selected_mcp_servers != mcp_servers
+        or selected_skill_list != skill_list
+        or selected_skill_mode != current_skill_mode
+    ):
         selected_strands_tools = strands_tools
         selected_mcp_servers = mcp_servers
         selected_skill_list = skill_list
+        selected_skill_mode = current_skill_mode
         
         mcp_manager.stop_agent_clients()
         
@@ -1255,7 +1187,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
 
             elif "current_tool_use" in event:
                 current_tool_use = event["current_tool_use"]
-                logger.info(f"current_tool_use: {current_tool_use}")
+                # logger.info(f"current_tool_use: {current_tool_use}")
                 name = current_tool_use.get("name", "")
                 input_val = current_tool_use.get("input", "")
                 toolUseId = current_tool_use.get("toolUseId", "")
