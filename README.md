@@ -4,9 +4,7 @@
 
 Agent의 기본 동작 확인 및 구현을 위해 **ECS Fargate**에 Docker 컨테이너 형태로 탑재되어 ALB와 CloudFront를 이용해 Streamlit으로 테스트할 수 있습니다. `installer.py`가 AgentCore Memory IAM Role·Memory 인스턴스·Knowledge Base·ECS 인프라를 자동 배포합니다. User ID별로 대화·메모리를 분리하며, MCP(`short term memory`, `long term memory`)로 에이전트가 필요 시 메모리를 조회합니다.
 
-<img width="813" height="372" alt="memory" src="https://github.com/user-attachments/assets/a934f5f1-7133-4e9e-bbc8-d3ca5438a5f4" />
-
-<img width="1000" alt="image" src="https://github.com/user-attachments/assets/66ebfed9-6209-4bab-a33d-e91250eb68e7" />
+<img width="1000" alt="image" src="https://github.com/user-attachments/assets/2c1439a4-b9ad-4f1b-874e-53856a913fa4" />
 
 
 ## Memory
