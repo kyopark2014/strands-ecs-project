@@ -3658,7 +3658,14 @@ def build_and_push_docker_image(repository_uri: str, image_tag: str = "latest") 
         raise RuntimeError(f"Docker login to ECR failed: {docker_login.stderr.strip()}")
 
     _run_command(
-        ["docker", "build", "--platform", "linux/amd64", "-t", image_uri, "."],
+        [
+            "docker", "build",
+            "--platform", "linux/amd64",
+            "--provenance=false",
+            "--sbom=false",
+            "-t", image_uri,
+            ".",
+        ],
         cwd=project_root,
     )
     _run_command(["docker", "push", image_uri])
