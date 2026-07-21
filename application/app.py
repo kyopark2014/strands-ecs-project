@@ -103,8 +103,6 @@ with st.sidebar:
     ]
 
     mcp_selections = {}
-    default_mcp_selections = ["korea_weather", "web_fetch", "websearch", "long term memory"]
-
     # Default: prevent strands_selections undefined when not in Agent mode
     default_strands_tool_selections = config.get("default_strands_tool_selections") or default_strands_tool_selections
     strands_selections = {tool: tool in default_strands_tool_selections for tool in strands_tools}
@@ -114,7 +112,7 @@ with st.sidebar:
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = config.get("default_skills") or ["skill-creator"]
+        default_skill_selections, default_mcp_selections = utils.get_initial_tool_defaults()
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
             available_skill_info = strands_agent.available_skills()
@@ -124,11 +122,6 @@ with st.sidebar:
     
         selected_skills = [name for name, is_selected in skill_selections.items() if is_selected]
         logger.info(f"selected_skills: {selected_skills}")
-
-        if selected_skills != config.get("default_skills"):
-            config["default_skills"] = selected_skills
-            with open(utils.config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=4)
 
         # Strands Tool Config JSON input
         st.subheader("⚙️ Strands Tool Config")
@@ -197,6 +190,12 @@ with st.sidebar:
             logger.info("save to user_defined_mcp.json")
         
         mcp_servers = [server for server, is_selected in mcp_selections.items() if is_selected]
+        if (
+            selected_skills != default_skill_selections
+            or mcp_servers != default_mcp_selections
+        ):
+            utils.save_favorite_tools(skills=selected_skills, mcp_servers=mcp_servers)
+
 
     else:
         mcp_servers = []
