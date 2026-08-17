@@ -18,7 +18,8 @@ try:
         name = "mcp-retrieve",
         instructions=(
             "You are a helpful assistant. "
-            "You retrieve documents in RAG."
+            "You search the user's knowledge base with RAG. "
+            "Use this for information lookup alongside web/wiki search when relevant."
         ),
     )
     logger.info("MCP server initialized successfully")
@@ -32,9 +33,10 @@ except Exception as e:
 @mcp.tool()
 def retrieve(keyword: str) -> str:
     """
-    Query the keyword using RAG based on the knowledge base.
-    keyword: the keyword to query
-    return: the result of query
+    Search the user's knowledge base (RAG) for relevant documents.
+    Use together with web/wiki search when looking up information the user may have stored.
+    keyword: the search query / keyword to look up
+    return: matching document excerpts from the knowledge base
     """
     logger.info(f"search --> keyword: {keyword}")
 
