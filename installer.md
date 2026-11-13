@@ -51,7 +51,7 @@ region = "us-west-2"           # AWS 리전
 git_name = "strands-ecs-project"
 
 # AgentCore Web Search Gateway
-AGENTCORE_GATEWAY_REGION = "us-east-1"
+AGENTCORE_GATEWAY_REGION = "us-west-2"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
 
@@ -111,7 +111,7 @@ custom_header_value = f"{project_name}_12dab15e4s31"
 
 ### 4. AgentCore Web Search Gateway
 
-- **리전**: `us-east-1` (`AGENTCORE_GATEWAY_REGION`)
+- **리전**: `us-west-2` (`AGENTCORE_GATEWAY_REGION`)
 - **게이트웨이**: `gateway-websearch`
 - MCP `websearch` 도구용 Gateway URL이 `application/config.json`에 기록
 

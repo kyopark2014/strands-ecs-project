@@ -462,7 +462,7 @@ agent = Agent(
     "type": "streamable_http",
     "url": gateway_url,  # config.json agentcore_websearch_gateway_url
     "auth_type": "aws_sigv4",
-    "auth_region": "us-east-1",
+    "auth_region": "us-west-2",
     "auth_service": "bedrock-agentcore",
 }
 ```

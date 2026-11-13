@@ -140,7 +140,7 @@ def load_config(mcp_type):
         if not gateway_url:
             logger.info(
                 "AgentCore gateway websearch MCP skipped: "
-                "gateway-websearch not found in us-east-1."
+                "gateway-websearch not found in us-west-2."
             )
             return {}
         gateway_region = config.get("agentcore_websearch_gateway_region", "us-east-1")

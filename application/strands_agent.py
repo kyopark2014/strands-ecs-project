@@ -1099,7 +1099,7 @@ def init_mcp_clients(mcp_servers: list):
             auth_region = None
             auth_service = None
             if server_config.get("auth_type") == "aws_sigv4":
-                auth_region = server_config.get("auth_region", "us-east-1")
+                auth_region = server_config.get("auth_region", "us-west-2")
                 auth_service = server_config.get("auth_service", "bedrock-agentcore")
             logger.info(f"Adding MCP client - name: {name}, url: {url}, headers: {headers}")
                 
